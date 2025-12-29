@@ -1,11 +1,7 @@
-import type { Feature, FeatureContext } from './types.js';
+import type { Feature } from './types.js';
 
-export function clamp(x: number, min = -1, max = 1): number {
+function clamp(x: number, min = -1, max = 1): number {
   return Math.max(min, Math.min(max, x));
-}
-
-export function sigmoid(x: number): number {
-  return 1 / (1 + Math.exp(-x));
 }
 
 export const indentationDelta: Feature = {
@@ -80,7 +76,7 @@ export const tokenRepetitionScore: Feature = {
     if (!ctx.candidateSpan || !ctx.schemaStats) return 0;
 
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const token = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const token = (ctx.lines[lineIndex]?.slice(start, end) ?? '').trim();
 
     const freq = ctx.schemaStats.tokenFrequency[token] ?? 0;
     const entityCount = ctx.schemaStats.entityCount || 1;
@@ -134,6 +130,8 @@ export const optionalFieldPenalty: Feature = {
 export const segmentFeatures: Feature[] = [
   tokenCountBucket,
   numericRatio,
+  tokenRepetitionScore,
+  delimiterContextIsolation,
   relativePositionConsistency,
   optionalFieldPenalty
 ];

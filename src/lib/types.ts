@@ -35,8 +35,6 @@ export interface JointState {
   fields: FieldLabel[];
 }
 
-export const STATES: BoundaryState[] = ["B", "C"];
-
 export interface TransitionWeights {
   B_to_B: number;
   B_to_C: number;
@@ -53,8 +51,8 @@ export const defaultTransitions: TransitionWeights = {
 
 export interface LineSpans {
   lineIndex: number;
-  spans: Array<{
+  spans: {
     start: number;
     end: number;
-  }>;
+  }[];
 }

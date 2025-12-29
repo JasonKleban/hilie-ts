@@ -1,32 +1,5 @@
-import { STATES, defaultTransitions } from './types.js';
-import type { FeatureContext, JointState, LineSpans, TransitionWeights, BoundaryState } from './types.js';
+import type { FeatureContext, JointState, LineSpans, BoundaryState } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
-
-interface ViterbiCell {
-  score: number;
-  prev: BoundaryState | null;
-}
-
-export function emissionScore(
-  state: BoundaryState,
-  ctx: FeatureContext,
-  weights: Record<string, number>
-): number {
-  let score = 0;
-
-  for (const f of boundaryFeatures) {
-    const value = f.apply(ctx);
-    const w = weights[f.id] ?? 0;
-
-    if (state === 'B') {
-      score += w * value;
-    } else {
-      score -= w * value;
-    }
-  }
-
-  return score;
-}
 
 export function boundaryEmissionScore(
   state: BoundaryState,
@@ -44,8 +17,10 @@ export function boundaryEmissionScore(
   return score;
 }
 
+import type { FieldLabel } from './types.js';
+
 export function fieldEmissionScore(
-  fields: string[],
+  fields: FieldLabel[],
   spans: LineSpans,
   ctxBase: FeatureContext,
   weights: Record<string, number>
@@ -81,7 +56,7 @@ export function jointEmissionScore(
   ctx: FeatureContext,
   weights: Record<string, number>
 ): number {
-  return boundaryEmissionScore(state.boundary, ctx, weights) + fieldEmissionScore(state.fields as string[], spans, ctx, weights);
+  return boundaryEmissionScore(state.boundary, ctx, weights) + fieldEmissionScore(state.fields, spans, ctx, weights);
 }
 
 export function transitionScore(prev: JointState, curr: JointState, weights: Record<string, number>): number {
@@ -102,56 +77,6 @@ export function transitionScore(prev: JointState, curr: JointState, weights: Rec
   return score;
 }
 
-export function viterbiDecodeBoundaries(
-  lines: string[],
-  featureWeights: Record<string, number>,
-  transitionWeights: TransitionWeights = defaultTransitions
-): BoundaryState[] {
-  const T = lines.length;
-  const lattice: Record<BoundaryState, ViterbiCell>[] = [];
-
-  lattice[0] = {
-    B: { score: 0, prev: null },
-    C: { score: -Infinity, prev: null }
-  };
-
-  for (let t = 1; t < T; t++) {
-    lattice[t] = {} as any;
-
-    for (const curr of STATES) {
-      let bestScore = -Infinity;
-      let bestPrev: BoundaryState | null = null;
-
-      for (const prev of STATES) {
-        const transition = transitionWeights[`${prev}_to_${curr}` as keyof TransitionWeights];
-
-        const ctx: FeatureContext = { lineIndex: t, lines };
-
-        const score = lattice[t - 1]![prev].score + transition + emissionScore(curr, ctx, featureWeights);
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestPrev = prev;
-        }
-      }
-
-      lattice[t]![curr] = { score: bestScore, prev: bestPrev };
-    }
-  }
-
-  let lastState: BoundaryState = lattice[T - 1]!.B.score > lattice[T - 1]!.C.score ? 'B' : 'C';
-
-  const path: BoundaryState[] = Array(T);
-  path[T - 1] = lastState;
-
-  for (let t = T - 1; t > 0; t--) {
-    lastState = lattice[t]![lastState].prev!;
-    path[t - 1] = lastState;
-  }
-
-  return path;
-}
-
 interface VCell {
   score: number;
   prev: number | null;
@@ -170,7 +95,11 @@ export function enumerateStates(spans: LineSpans, maxFields = 3): JointState[] {
     }
 
     for (const f of fieldLabels) {
+      // Enforce unique non-NOISE fields and respect maxFields
+      const nonNoiseCount = acc.filter(x => x !== 'NOISE').length;
       if (f !== 'NOISE' && acc.includes(f)) continue;
+      if (f !== 'NOISE' && nonNoiseCount >= maxFields) continue;
+
       acc.push(f);
       backtrack(i + 1, acc);
       acc.pop();
