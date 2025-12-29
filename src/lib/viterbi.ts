@@ -1,4 +1,4 @@
-import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState } from './types.js';
+import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
 function boundaryEmissionScore(
@@ -43,12 +43,28 @@ function fieldEmissionScore(
       const w = weights[f.id] ?? 0;
       const v = f.apply(ctx);
 
-      // Label-aware bias: when a segment looks like a phone/email, prefer assigning the
-      // corresponding Phone/Email label and weakly penalize assigning it to other labels.
+      // extract span text for heuristics like numeric-length checks
+      const spanText = ctx.candidateSpan ? ctx.lines[ctx.candidateSpan.lineIndex]?.slice(ctx.candidateSpan.start, ctx.candidateSpan.end) ?? '' : '';
+      const exact10or11Digits = /^\d{10,11}$/.test(spanText.replace(/\D/g, ''));
+
+      // Label-aware biases for specific segment detectors
       if (f.id === 'segment.is_phone') {
         score += (label === 'Phone') ? w * v : -0.5 * w * v;
       } else if (f.id === 'segment.is_email') {
         score += (label === 'Email') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_extid') {
+        // prefer ExtID label when extid-like; but penalize assigning ExtID to exact 10/11 digit values (likely phones)
+        if (exact10or11Digits) {
+          score += (label === 'ExtID') ? -0.8 * w * v : (label === 'Phone' ? 0.7 * w * v : -0.3 * w * v);
+        } else {
+          score += (label === 'ExtID') ? w * v : -0.5 * w * v;
+        }
+      } else if (f.id === 'segment.is_fullname') {
+        score += (label === 'FullName') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_preferred_name') {
+        score += (label === 'PreferredName') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_birthdate') {
+        score += (label === 'Birthdate') ? w * v : -0.5 * w * v;
       } else {
         score += w * v;
       }
@@ -90,7 +106,7 @@ interface VCell {
   prev: number | null;
 }
 
-export function enumerateStates(spans: LineSpans, opts?: import('./types.js').EnumerateOptions): JointState[] {
+export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): JointState[] {
   const states: JointState[] = [];
 
   const options = {
@@ -235,11 +251,28 @@ export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[],
       for (const f of segmentFeatures) {
         const v = f.apply(ctx);
         let contrib = v;
+
+        const spanText = ctx.candidateSpan ? ctx.lines[ctx.candidateSpan.lineIndex]?.slice(ctx.candidateSpan.start, ctx.candidateSpan.end) ?? '' : '';
+        const exact10or11Digits = /^\d{10,11}$/.test(spanText.replace(/\D/g, ''));
+
         if (f.id === 'segment.is_phone') {
           contrib = label === 'Phone' ? v : -0.5 * v;
         } else if (f.id === 'segment.is_email') {
           contrib = label === 'Email' ? v : -0.5 * v;
+        } else if (f.id === 'segment.is_extid') {
+          if (exact10or11Digits) {
+            contrib = (label === 'ExtID') ? -0.8 * v : (label === 'Phone') ? 0.7 * v : -0.3 * v;
+          } else {
+            contrib = label === 'ExtID' ? v : -0.5 * v;
+          }
+        } else if (f.id === 'segment.is_fullname') {
+          contrib = label === 'FullName' ? v : -0.5 * v;
+        } else if (f.id === 'segment.is_preferred_name') {
+          contrib = label === 'PreferredName' ? v : -0.5 * v;
+        } else if (f.id === 'segment.is_birthdate') {
+          contrib = label === 'Birthdate' ? v : -0.5 * v;
         }
+
         vec[f.id] = (vec[f.id] ?? 0) + contrib;
       }
     }
@@ -248,7 +281,7 @@ export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[],
   return vec;
 }
 
-export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpans[], gold: JointState[], weights: Record<string, number>, lr = 1.0, enumerateOpts?: import('./types.js').EnumerateOptions): { updated: Record<string, number>; pred: JointState[] } {
+export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpans[], gold: JointState[], weights: Record<string, number>, lr = 1.0, enumerateOpts?: EnumerateOptions): { updated: Record<string, number>; pred: JointState[] } {
   // Predict with current weights
   const pred = jointViterbiDecode(lines, spansPerLine, weights, enumerateOpts);
 
@@ -290,8 +323,8 @@ export function annotateEntityTypes(lines: string[], joint: JointState[]): Joint
   });
 }
 
-export function inferRelationships(joint: JointState[]): import('./types.js').Relationship[] {
-  const rels: import('./types.js').Relationship[] = [];
+export function inferRelationships(joint: JointState[]): Relationship[] {
+  const rels: Relationship[] = [];
 
   // Build index of primary lines
   const primaries = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Primary');

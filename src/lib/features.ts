@@ -1,5 +1,5 @@
 import type { Feature } from './types.js';
-import { isLikelyEmail, isLikelyPhone } from './validators.js';
+import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyFullName, isLikelyPreferredName } from './validators.js';
 
 function clamp(x: number, min = -1, max = 1): number {
   return Math.max(min, Math.min(max, x));
@@ -172,7 +172,58 @@ export const optionalFieldPenalty: Feature = {
   }
 };
 
+// New segment-level heuristics: birthdate, ExtID, FullName, PreferredName
+export const segmentIsBirthdate: Feature = {
+  id: 'segment.is_birthdate',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    return isLikelyBirthdate(text) ? 1 : 0;
+  }
+};
+
+export const segmentIsExtID: Feature = {
+  id: 'segment.is_extid',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+
+    // prefer extids that appear near start of line
+    const line = ctx.lines[lineIndex] ?? '';
+    const posBias = Math.max(0, 1 - (start / Math.max(1, line.length))); // 1 near start, 0 at end
+
+    return isLikelyExtID(text) ? (0.8 + 0.2 * posBias) : 0;
+  }
+};
+
+export const segmentIsFullName: Feature = {
+  id: 'segment.is_fullname',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    return isLikelyFullName(text) ? 1 : 0;
+  }
+};
+
+export const segmentIsPreferredName: Feature = {
+  id: 'segment.is_preferred_name',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    return isLikelyPreferredName(text) ? 1 : 0;
+  }
+};
+
 export const segmentFeatures: Feature[] = [
+  // put stronger signals up-front so they influence decoding earlier
+  segmentIsExtID,
+  segmentIsFullName,
+  segmentIsPreferredName,
+  segmentIsBirthdate,
   segmentIsEmail,
   segmentIsPhone,
   tokenCountBucket,
@@ -182,5 +233,4 @@ export const segmentFeatures: Feature[] = [
   relativePositionConsistency,
   optionalFieldPenalty
 ];
-
 export const boundaryFeatures: Feature[] = [indentationDelta, lexicalSimilarityDrop, primaryLikely, guardianLikely];

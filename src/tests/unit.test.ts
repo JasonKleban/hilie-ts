@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { spanGenerator } from '../lib/utils.js';
 import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample } from '../lib/viterbi.js';
-import { isLikelyEmail, isLikelyPhone } from '../lib/validators.js';
+import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyFullName, isLikelyPreferredName } from '../lib/validators.js';
 
 function ok(cond: boolean, msg?: string) {
   if (!cond) throw new Error(msg || 'ok failed');
@@ -86,7 +86,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   console.log('✓ enumerateStates single-occurrence uniqueness');
 })();
 
-// 8) validators: email and phone heuristics
+// 8) validators: email, phone, birthdate, extid, name heuristics
 (() => {
 
   ok(isLikelyEmail('alice@example.com'), 'basic email recognized');
@@ -95,7 +95,23 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(isLikelyPhone('(020) 7123 4567'), 'local phone with parentheses recognized');
   ok(!isLikelyPhone('123'), 'too short phone rejected');
 
-  console.log('✓ email & phone validators');
+  // birthdate heuristics
+  ok(isLikelyBirthdate('05/12/2008'), 'MM/DD/YYYY birthdate recognized');
+  ok(isLikelyBirthdate('2008-05-12'), 'YYYY-MM-DD birthdate recognized');
+  ok(isLikelyBirthdate('May 12, 2008'), 'Month name birthdate recognized');
+
+  // extid heuristics
+  ok(isLikelyExtID('#A-12345'), 'hash-prefixed alnum extid recognized');
+  ok(isLikelyExtID('ABC123'), 'alphanumeric extid recognized');
+  ok(!isLikelyExtID('1234567890'), '10-digit-only is treated as phone-ish / ambiguous');
+
+  // name heuristics
+  ok(isLikelyFullName('William Rojas'), 'two-token capitalized name recognized');
+  ok(isLikelyFullName('Rojas, William'), 'Last, First recognized');
+  ok(isLikelyPreferredName('"Billy"'), 'quoted preferred name recognized');
+  ok(isLikelyPreferredName('(Billy)'), 'parenthesized preferred name recognized');
+
+  console.log('✓ email, phone, birthdate, extid & name validators');
 })();
 
 // 9) segment features influence decoding: prefer Phone/Email when detected
@@ -125,6 +141,39 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(emailLine.includes('Email'), 'decoder should label email-like span as Email');
 
   console.log('✓ segment feature influence on decoding (enum+decode checks)');
+})();
+
+// 11) segment features: ExtID, FullName, PreferredName, Birthdate influence decoding (and phone precedence for 10-digit exacts)
+(() => {
+  const lines = ['#12345 William "Billy" Rojas', 'DOB: 05/12/2008', '1234567890'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
+
+  const weights = {
+    'segment.is_extid': 6.0,
+    'segment.is_fullname': 6.0,
+    'segment.is_preferred_name': 6.0,
+    'segment.is_birthdate': 8.0,
+    'segment.is_phone': 10.0
+  } as any;
+
+  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 512 });
+
+  // Line 0 should include an ExtID and a FullName/PreferredName assignment on some spans
+  const line0 = joint[0]!.fields;
+  const hasExtID = line0.some(f => f === 'ExtID');
+  const hasFullOrPref = line0.some(f => f === 'FullName' || f === 'PreferredName');
+  ok(hasExtID, 'decoder should assign ExtID on the first line where present');
+  ok(hasFullOrPref, 'decoder should assign FullName or PreferredName on the first line');
+
+  // Line 1 should include Birthdate
+  const line1 = joint[1]!.fields;
+  ok(line1.some(f => f === 'Birthdate'), 'decoder should assign Birthdate for the DOB-like span');
+
+  // Line 2 is exact 10-digit string; despite ExtID heuristics, it should be treated as Phone
+  const line2 = joint[2]!.fields;
+  ok(line2.some(f => f === 'Phone'), 'exact 10-digit numeric should prefer Phone over ExtID');
+
+  console.log('✓ segment features for ExtID/Name/Birthdate decoding');
 })();
 
 // 10) trainer: extractFeatureVector and updateWeightsFromExample
