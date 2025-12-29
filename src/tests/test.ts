@@ -25,6 +25,9 @@ const featureWeights = {
 };
 
 const states = viterbiDecodeBoundaries(lines, featureWeights, defaultTransitions);
+
+console.log(states);
+
 strictEqual(states.length, lines.length, 'boundary decode should return one state per line');
 strictEqual(states[0], 'B', 'first state should be B');
 for (const s of states) ok(s === 'B' || s === 'C');
@@ -48,6 +51,13 @@ const featureWeights2: Record<string, number> = {
 };
 
 const result = jointViterbiDecode(lines2, spansPerLine, featureWeights2);
+
+result.forEach((state, i) => {
+  console.log(`Line ${i}: ${lines2[i]}`);
+  console.log(`  Boundary: ${state.boundary}`);
+  console.log(`  Fields:   ${state.fields.join(", ")}`);
+});
+
 strictEqual(result.length, lines2.length);
 for (let i = 0; i < result.length; i++) {
   const state = result[i]!;
