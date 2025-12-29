@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spanGenerator } from '../lib/utils.js';
-import { enumerateStates, jointViterbiDecode } from '../lib/viterbi.js';
+import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone } from '../lib/validators.js';
 
 function ok(cond: boolean, msg?: string) {
@@ -125,6 +125,42 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(emailLine.includes('Email'), 'decoder should label email-like span as Email');
 
   console.log('✓ segment feature influence on decoding (enum+decode checks)');
+})();
+
+// 10) trainer: extractFeatureVector and updateWeightsFromExample
+( () => {
+  // simple scenario: worker has phone-like span but decoder currently doesn't pick Phone
+  const lines2 = ['Contact: +1 555-123-4567'];
+  const spans2 = spanGenerator(lines2, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
+
+  // construct a "gold" joint with Phone assigned to the phone span
+  const goldState: any = { boundary: 'B', fields: ['ExtID', 'NOISE', 'Phone'] };
+  const gold = [goldState];
+
+  // small initial weights
+  const w: Record<string, number> = { 'segment.is_phone': 0.1, 'segment.token_count_bucket': 0.1 };
+
+  const before = { ...w };
+  console.log('DEBUG spans2:', JSON.stringify(spans2, null, 2));
+  console.log('DEBUG span texts:', spans2[0]!.spans.map(s => lines2[0]!.slice(s.start, s.end)));
+  console.log('DEBUG isLikelyPhone per span:', spans2[0]!.spans.map(s => ({ text: lines2[0]!.slice(s.start, s.end), ok: isLikelyPhone(lines2[0]!.slice(s.start, s.end)) })));
+
+  const res = updateWeightsFromExample(lines2, spans2, gold, w, 1.0, { maxStates: 64 });
+
+  console.log('DEBUG trainer before weights:', before);
+  console.log('DEBUG trainer after weights:', w);
+  console.log('DEBUG pred state:', res.pred);
+
+  // after training, weight for 'segment.is_phone' should increase (positive update)
+  ok((w['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'training should increase phone feature weight');
+
+  // extractFeatureVector sanity: gold vector produces higher phone-related contribution
+  const vf = extractFeatureVector(lines2, spans2, gold);
+  const vp = extractFeatureVector(lines2, spans2, res.pred);
+  console.log('DEBUG vf:', vf, 'vp:', vp);
+  ok((vf['segment.is_phone'] ?? 0) >= (vp['segment.is_phone'] ?? 0), 'gold feature count should be >= pred for phone');
+
+  console.log('✓ trainer feature extraction and weight update');
 })();
 
 console.log('All unit tests passed.');

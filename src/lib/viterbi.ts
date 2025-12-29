@@ -207,6 +207,65 @@ export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], f
   return path;
 }
 
+// --- Feature vector extraction and lightweight trainer (structured perceptron-like) ---
+export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[], joint: JointState[]): Record<string, number> {
+  const vec: Record<string, number> = {};
+
+  // boundary features (line-level)
+  for (let i = 0; i < joint.length; i++) {
+    const state = joint[i]!;
+    const ctx: FeatureContext = { lineIndex: i, lines };
+    for (const f of boundaryFeatures) {
+      const v = f.apply(ctx);
+      const contrib = state.boundary === 'B' ? v : -v;
+      vec[f.id] = (vec[f.id] ?? 0) + contrib;
+    }
+  }
+
+  // segment features (span-level)
+  for (let i = 0; i < joint.length; i++) {
+    const state = joint[i]!;
+    const spans = spansPerLine[i]!;
+
+    for (let si = 0; si < spans.spans.length; si++) {
+      const span = spans.spans[si]!;
+      const label = state.fields[si];
+      const ctx: FeatureContext = { lineIndex: i, lines, candidateSpan: { lineIndex: i, start: span.start, end: span.end } };
+
+      for (const f of segmentFeatures) {
+        const v = f.apply(ctx);
+        let contrib = v;
+        if (f.id === 'segment.is_phone') {
+          contrib = label === 'Phone' ? v : -0.5 * v;
+        } else if (f.id === 'segment.is_email') {
+          contrib = label === 'Email' ? v : -0.5 * v;
+        }
+        vec[f.id] = (vec[f.id] ?? 0) + contrib;
+      }
+    }
+  }
+
+  return vec;
+}
+
+export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpans[], gold: JointState[], weights: Record<string, number>, lr = 1.0, enumerateOpts?: import('./types.js').EnumerateOptions): { updated: Record<string, number>; pred: JointState[] } {
+  // Predict with current weights
+  const pred = jointViterbiDecode(lines, spansPerLine, weights, enumerateOpts);
+
+  // Extract feature vectors for gold and pred
+  const vGold = extractFeatureVector(lines, spansPerLine, gold);
+  const vPred = extractFeatureVector(lines, spansPerLine, pred);
+
+  // Apply perceptron-like update: w += lr * (vGold - vPred)
+  const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
+  for (const k of keys) {
+    const delta = (vGold[k] ?? 0) - (vPred[k] ?? 0);
+    weights[k] = (weights[k] ?? 0) + lr * delta;
+  }
+
+  return { updated: weights, pred };
+}
+
 // Heuristic entity-type detection (post-decode)
 export function annotateEntityTypes(lines: string[], joint: JointState[]): JointState[] {
   return joint.map((state, idx) => {
