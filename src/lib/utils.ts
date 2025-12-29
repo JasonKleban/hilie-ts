@@ -5,7 +5,7 @@ export function naiveSpanGenerator(lines: string[]): LineSpans[] {
     const spans: Array<{ start: number; end: number }> = [];
     let cursor = 0;
 
-    for (const part of line.split(/\b/)) {
+    for (const part of line.split(/\|/)) {
       const trimmed = part.trim();
       const start = line.indexOf(trimmed, cursor);
       const end = start + trimmed.length;

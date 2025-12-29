@@ -1,7 +1,7 @@
-import type { FeatureContext, JointState, LineSpans, BoundaryState } from './types.js';
+import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
-export function boundaryEmissionScore(
+function boundaryEmissionScore(
   state: BoundaryState,
   ctx: FeatureContext,
   weights: Record<string, number>
@@ -17,9 +17,7 @@ export function boundaryEmissionScore(
   return score;
 }
 
-import type { FieldLabel } from './types.js';
-
-export function fieldEmissionScore(
+function fieldEmissionScore(
   fields: FieldLabel[],
   spans: LineSpans,
   ctxBase: FeatureContext,
@@ -50,7 +48,7 @@ export function fieldEmissionScore(
   return score;
 }
 
-export function jointEmissionScore(
+function jointEmissionScore(
   state: JointState,
   spans: LineSpans,
   ctx: FeatureContext,
@@ -59,7 +57,7 @@ export function jointEmissionScore(
   return boundaryEmissionScore(state.boundary, ctx, weights) + fieldEmissionScore(state.fields, spans, ctx, weights);
 }
 
-export function transitionScore(prev: JointState, curr: JointState, weights: Record<string, number>): number {
+function transitionScore(prev: JointState, curr: JointState, weights: Record<string, number>): number {
   let score = 0;
 
   if (prev.boundary === 'B' && curr.boundary === 'B') {

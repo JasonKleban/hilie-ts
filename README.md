@@ -12,8 +12,7 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
   - *Segment features* (e.g., token count bucket, numeric ratio) used to score candidate spans — `src/lib/features.ts` (`segmentFeatures`).
 
 - **Viterbi Decoding**:
-  - `viterbiDecodeBoundaries` finds an optimal sequence of boundary states (B or C) across lines using DP.
-  - `jointViterbiDecode` performs a joint decoding across boundaries and field label assignments per-line.
+  - `jointViterbiDecode` performs a joint decoding across boundaries and field label assignments per-line. For single-purpose boundary decoding, you can derive per-line boundary scores from the boundary features or run `jointViterbiDecode` with simplified state spaces.
   - Code: `src/lib/viterbi.ts`.
 
 - **Types**: Central types and small configuration objects live in `src/lib/types.ts` (e.g., `JointState`, `TransitionWeights`, `defaultTransitions`).
@@ -37,7 +36,7 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 
 3. Use in your code:
 
-   import { viterbiDecodeBoundaries, jointViterbiDecode, naiveSpanGenerator } from 'hilie-ts';
+   import { jointViterbiDecode, naiveSpanGenerator } from 'hilie-ts';
 
 ## Roadmap / TODOs
 
