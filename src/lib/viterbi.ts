@@ -41,7 +41,17 @@ function fieldEmissionScore(
 
     for (const f of segmentFeatures) {
       const w = weights[f.id] ?? 0;
-      score += w * f.apply(ctx);
+      const v = f.apply(ctx);
+
+      // Label-aware bias: when a segment looks like a phone/email, prefer assigning the
+      // corresponding Phone/Email label and weakly penalize assigning it to other labels.
+      if (f.id === 'segment.is_phone') {
+        score += (label === 'Phone') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_email') {
+        score += (label === 'Email') ? w * v : -0.5 * w * v;
+      } else {
+        score += w * v;
+      }
     }
   }
 
@@ -80,40 +90,85 @@ interface VCell {
   prev: number | null;
 }
 
-export function enumerateStates(spans: LineSpans, maxFields = 3): JointState[] {
+export function enumerateStates(spans: LineSpans, opts?: import('./types.js').EnumerateOptions): JointState[] {
   const states: JointState[] = [];
 
-  const fieldLabels: string[] = ['F1', 'F2', 'F3', 'NOISE'];
+  const options = {
+    maxUniqueFields: opts?.maxUniqueFields ?? 3,
+    maxPhones: opts?.maxPhones ?? 3,
+    maxEmails: opts?.maxEmails ?? 3,
+    safePrefix: opts?.safePrefix ?? 8,
+    maxStates: opts?.maxStates ?? 2048
+  };
+
+  const fieldLabels: string[] = ['ExtID', 'FullName', 'PreferredName', 'Phone', 'Email', 'GeneralNotes', 'MedicalNotes', 'DietaryNotes', 'Birthdate', 'NOISE'];
+
+  const repeatable = new Set(['Phone', 'Email']);
+
+  // To avoid exponential blowup, only enumerate over an initial prefix when the span count is large.
+  const SAFE_PREFIX = options.safePrefix;
+  const prefixLen = Math.min(spans.spans.length, SAFE_PREFIX);
+
+  function countOccurrences(acc: string[], label: string) {
+    return acc.filter(x => x === label).length;
+  }
+
+  function distinctNonNoiseCount(acc: string[]) {
+    return new Set(acc.filter(x => x !== 'NOISE')).size;
+  }
 
   function backtrack(i: number, acc: string[]) {
-    if (i === spans.spans.length) {
-      states.push({ boundary: 'B', fields: [...(acc as any)] });
-      states.push({ boundary: 'C', fields: [...(acc as any)] });
+    // Global safety check: stop if we've reached the cap
+    if (states.length >= options.maxStates) return;
+
+    if (i === prefixLen) {
+      // if we limited to a prefix, fill remaining positions with NOISE
+      const tail = spans.spans.slice(prefixLen).map(() => 'NOISE' as const);
+      // Push states but guard against exceeding the cap
+      if (states.length < options.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
+      if (states.length < options.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
       return;
     }
 
     for (const f of fieldLabels) {
-      // Enforce unique non-NOISE fields and respect maxFields
-      const nonNoiseCount = acc.filter(x => x !== 'NOISE').length;
-      if (f !== 'NOISE' && acc.includes(f)) continue;
-      if (f !== 'NOISE' && nonNoiseCount >= maxFields) continue;
+      // Another quick cap check to avoid unnecessary work
+      if (states.length >= options.maxStates) return;
+
+      const nonNoiseCount = distinctNonNoiseCount(acc);
+
+      // Enforce uniqueness for single-occurrence labels
+      if (f !== 'NOISE' && !repeatable.has(f) && acc.includes(f)) continue;
+
+      // Enforce max unique fields
+      if (f !== 'NOISE' && !acc.includes(f) && nonNoiseCount >= options.maxUniqueFields) continue;
+
+      // Enforce per-label caps for repeatables
+      if (f === 'Phone' && countOccurrences(acc, 'Phone') >= options.maxPhones) continue;
+      if (f === 'Email' && countOccurrences(acc, 'Email') >= options.maxEmails) continue;
 
       acc.push(f);
       backtrack(i + 1, acc);
       acc.pop();
+
+      // Safety: if we've generated a large number of states, bail out early.
+      if (states.length >= options.maxStates) return;
     }
   }
 
   backtrack(0, []);
+
+  // Enforce strict cap just in case generation slightly exceeded the threshold
+  if (states.length > options.maxStates) states.length = options.maxStates;
+
   return states;
 }
 
-export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>): JointState[] {
+export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: import('./types.js').EnumerateOptions): JointState[] {
   const lattice: VCell[][] = [];
   const stateSpaces: JointState[][] = [];
 
   for (const spans of spansPerLine) {
-    stateSpaces.push(enumerateStates(spans));
+    stateSpaces.push(enumerateStates(spans, enumerateOpts));
   }
 
   lattice[0] = stateSpaces[0]?.map(() => ({ score: 0, prev: null })) ?? [];
@@ -150,4 +205,49 @@ export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], f
   }
 
   return path;
+}
+
+// Heuristic entity-type detection (post-decode)
+export function annotateEntityTypes(lines: string[], joint: JointState[]): JointState[] {
+  return joint.map((state, idx) => {
+    const line = lines[idx] ?? '';
+    const fields = state.fields;
+
+    // Guardian heuristics: explicit tokens
+    if (/\bparent\b|\bguardian\b/i.test(line)) {
+      return { ...state, entityType: 'Guardian' };
+    }
+
+    // Primary heuristics: leading numeric ID or comma-separated Last, First
+    if (/^\s*\d+\b/.test(line) || /^\s*[A-Za-z]+,\s*[A-Za-z]+/.test(line)) {
+      return { ...state, entityType: 'Primary' };
+    }
+
+    // If fields looks like multiple populated fields (F1 and F2 non-NOISE), prefer Primary
+    const nonNoise = fields.filter(f => f !== 'NOISE').length;
+    if (nonNoise >= 2) return { ...state, entityType: 'Primary' };
+
+    return { ...state, entityType: 'Unknown' };
+  });
+}
+
+export function inferRelationships(joint: JointState[]): import('./types.js').Relationship[] {
+  const rels: import('./types.js').Relationship[] = [];
+
+  // Build index of primary lines
+  const primaries = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Primary');
+  const guardians = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Guardian');
+
+  // Simple heuristic: assign each guardian to the nearest preceding primary within 6 lines
+  for (const g of guardians) {
+    let closest: { s: JointState; i: number } | null = null;
+    for (const p of primaries) {
+      if (p.i <= g.i && (closest === null || g.i - p.i < g.i - closest.i)) closest = p;
+    }
+    if (closest && g.i - closest.i <= 6) {
+      rels.push({ primaryIndex: closest.i, guardianIndex: g.i });
+    }
+  }
+
+  return rels;
 }

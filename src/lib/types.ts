@@ -28,11 +28,37 @@ export interface Feature {
 }
 
 export type BoundaryState = "B" | "C";
-export type FieldLabel = "F1" | "F2" | "F3" | "NOISE";
+export type FieldLabel =
+  | 'ExtID'
+  | 'FullName'
+  | 'PreferredName'
+  | 'Phone'
+  | 'Email'
+  | 'GeneralNotes'
+  | 'MedicalNotes'
+  | 'DietaryNotes'
+  | 'Birthdate'
+  | 'NOISE';
+
+export interface EnumerateOptions {
+  maxUniqueFields?: number; // distinct non-NOISE fields allowed
+  maxPhones?: number; // cap for repeatable Phone labels
+  maxEmails?: number; // cap for repeatable Email labels
+  safePrefix?: number; // how many spans to fully enumerate before tailing with NOISE
+  maxStates?: number; // overall state cap to avoid explosion
+}
+
+export type EntityType = 'Primary' | 'Guardian' | 'Unknown';
 
 export interface JointState {
   boundary: BoundaryState;
   fields: FieldLabel[];
+  entityType?: EntityType;
+}
+
+export interface Relationship {
+  primaryIndex: number;
+  guardianIndex: number;
 }
 
 export interface TransitionWeights {

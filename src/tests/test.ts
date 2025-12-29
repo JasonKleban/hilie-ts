@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { jointViterbiDecode, naiveSpanGenerator } from '../index.js';
+import { jointViterbiDecode, spanGenerator, naiveSpanGenerator } from '../index.js';
 
 async function runDataDrivenTests() {
   let files: string[] = [];
@@ -41,17 +41,20 @@ async function runDataDrivenTests() {
       'line.lexical_similarity_drop': 1.0,
       'segment.token_count_bucket': 0.8,
       'segment.numeric_ratio': 1.2,
+      'segment.is_email': 2.0,
+      'segment.is_phone': 1.5,
       'field.relative_position_consistency': 0.6,
       'field.optional_penalty': -0.4
     } as Record<string, number>;
 
-    const spansPerLine = naiveSpanGenerator(lines);
+    // Use the more robust span generator by default
+    const spansPerLine = spanGenerator(lines);
 
-    for (var line of spansPerLine) {
-      console.info(line.lineIndex, line.spans);
-    }
+    // for (var line of spansPerLine) {
+    //   console.info(line.lineIndex, line.spans);
+    // }
 
-    const joint = jointViterbiDecode(lines, spansPerLine, jointWeights);
+    const joint = jointViterbiDecode(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
 
     joint.forEach((state, i) => {
       console.log(`Line ${i}: ${lines[i]}`);

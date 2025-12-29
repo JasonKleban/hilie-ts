@@ -1,4 +1,5 @@
 import type { Feature } from './types.js';
+import { isLikelyEmail, isLikelyPhone } from './validators.js';
 
 function clamp(x: number, min = -1, max = 1): number {
   return Math.max(min, Math.min(max, x));
@@ -70,6 +71,26 @@ export const numericRatio: Feature = {
   }
 };
 
+export const segmentIsEmail: Feature = {
+  id: 'segment.is_email',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    return isLikelyEmail(text) ? 1 : 0;
+  }
+};
+
+export const segmentIsPhone: Feature = {
+  id: 'segment.is_phone',
+  apply(ctx) {
+    if (!ctx.candidateSpan) return 0;
+    const { lineIndex, start, end } = ctx.candidateSpan;
+    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    return isLikelyPhone(text) ? 1 : 0;
+  }
+};
+
 export const tokenRepetitionScore: Feature = {
   id: 'token.repetition_score',
   apply(ctx) {
@@ -102,6 +123,30 @@ export const delimiterContextIsolation: Feature = {
   }
 };
 
+// New heuristics to help the decoder prefer Primary vs Guardian boundaries
+export const primaryLikely: Feature = {
+  id: 'line.primary_likely',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+
+    // leading numeric id, 'ID:' label, comma-separated Last, First, or table-like pipes
+    if (/^\s*\d+\b/.test(line) || /\bID:/i.test(line) || /^\s*[A-Za-z]+,\s*[A-Za-z]+/.test(line) || /\|/.test(line)) return 1;
+    return 0;
+  }
+};
+
+export const guardianLikely: Feature = {
+  id: 'line.guardian_likely',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+
+    if (/\bparent\b|\bguardian\b|\bmom\b|\bdad\b|\bfather\b|\bmother\b/i.test(line)) return 1;
+    // outline bullets with 'Parent'
+    if (/^\s*[*•o-]\s*Parent/i.test(line)) return 1;
+    return 0;
+  }
+};
+
 export const relativePositionConsistency: Feature = {
   id: 'field.relative_position_consistency',
   apply(ctx) {
@@ -128,6 +173,8 @@ export const optionalFieldPenalty: Feature = {
 };
 
 export const segmentFeatures: Feature[] = [
+  segmentIsEmail,
+  segmentIsPhone,
   tokenCountBucket,
   numericRatio,
   tokenRepetitionScore,
@@ -136,4 +183,4 @@ export const segmentFeatures: Feature[] = [
   optionalFieldPenalty
 ];
 
-export const boundaryFeatures: Feature[] = [indentationDelta, lexicalSimilarityDrop];
+export const boundaryFeatures: Feature[] = [indentationDelta, lexicalSimilarityDrop, primaryLikely, guardianLikely];
