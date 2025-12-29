@@ -1,0 +1,16 @@
+{
+  "name": "hilie-ts",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node dist/tests/test.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
