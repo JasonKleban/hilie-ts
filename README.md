@@ -1,6 +1,6 @@
 # hilie-ts — Human-in-the-loop Information Extractor (TypeScript)
 
-(This is almost entirely AI-generated and I don't know if it really works.)
+(This is almost entirely AI-generated and I don't know yet if it really works, but it seems to almost do something cool.)
 
 A compact library demonstrating Viterbi-based boundary and joint decoding for simple information extraction workflows.
 
