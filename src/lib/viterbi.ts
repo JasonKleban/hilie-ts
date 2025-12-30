@@ -1,4 +1,4 @@
-import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship, FieldSpan, EntitySpan } from './types.js';
+import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship, FieldSpan, Feedback, RecordSpan, SubEntitySpan, SubEntityType } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
 function boundaryEmissionScore(
@@ -179,7 +179,7 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
   return states;
 }
 
-export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: import('./types.js').EnumerateOptions): JointState[] {
+export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: EnumerateOptions): JointState[] {
   const lattice: VCell[][] = [];
   const stateSpaces: JointState[][] = [];
 
@@ -525,7 +525,7 @@ export function inferRelationships(joint: JointState[]): Relationship[] {
 }
 
 // --- New: convert joint states + spans into entity/field-level objects ---
-export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], joint: JointState[], featureWeights?: Record<string, number>): EntitySpan[] {
+export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], joint: JointState[], featureWeights?: Record<string, number>): RecordSpan[] {
   // compute line offsets
   const offsets: number[] = [];
   let off = 0;
@@ -567,28 +567,38 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
     return score;
   }
 
-  const entities: EntitySpan[] = [];
+  const records: RecordSpan[] = [];
+
+  // If entityType is not present in the joint, annotate it using heuristics
+  const jointAnnotated = (!joint.some(s => s && s.entityType !== undefined)) ? annotateEntityTypes(lines, joint) : joint;
+  const jointLocal = jointAnnotated;
 
   // find entity boundaries from joint states (lines with boundary === 'B')
-  for (let i = 0; i < joint.length; i++) {
-    if (joint[i]!.boundary !== 'B') continue;
-    // entity runs until next line with boundary === 'B' or end of document
+  for (let i = 0; i < jointLocal.length; i++) {
+    if (jointLocal[i]!.boundary !== 'B') continue;
+    // record runs until next line with boundary === 'B' or end of document
     let j = i + 1;
-    while (j < joint.length && joint[j]!.boundary !== 'B') j++;
+    while (j < jointLocal.length && jointLocal[j]!.boundary !== 'B') j++;
     const startLine = i;
     const endLine = j - 1;
 
-    // accumulate fields
-    const fields: FieldSpan[] = [];
+    // We will construct sub-entities inside this top-level record by grouping
+    // contiguous lines with the same annotated entityType (Primary/Guardian/Unknown).
+    const subEntities: SubEntitySpan[] = [];
 
     for (let li = startLine; li <= endLine; li++) {
+      const role = ((jointLocal[li] && jointLocal[li]!.entityType) ? (jointLocal[li]!.entityType as SubEntityType) : 'Unknown');
+      // Ignore Unknown roles when constructing sub-entities (noise lines should not create sub-entities)
+      if (role === 'Unknown') continue;
       const spans = spansPerLine[li]?.spans ?? [];
+
+      // collect fields for this line
+      const lineFields: FieldSpan[] = [];
       for (let si = 0; si < spans.length; si++) {
         const s = spans[si]!;
         const fileStart = offsets[li]! + s.start;
         const fileEnd = offsets[li]! + s.end;
         const text = lines[li]?.slice(s.start, s.end) ?? '';
-        // assigned label from joint state's fields if available
         const assignedLabel = (joint[li] && joint[li]!.fields && joint[li]!.fields[si]) ? joint[li]!.fields[si] : undefined;
 
         // approximate confidence via softmax over label scores if weights provided
@@ -597,34 +607,48 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
           const labelScores: number[] = [];
           const labels: FieldLabel[] = ['ExtID','Name','PreferredName','Phone','Email','GeneralNotes','MedicalNotes','DietaryNotes','Birthdate','NOISE'];
           for (const lab of labels) labelScores.push(scoreLabelForSpan(li, si, lab as FieldLabel));
-          // softmax
           const max = Math.max(...labelScores);
           const exps = labelScores.map(sv => Math.exp(sv - max));
           const ssum = exps.reduce((a,b) => a+b, 0);
           const probs = exps.map(e => e / ssum);
-          // map assignedLabel to index
           const idx = labels.indexOf(assignedLabel ?? 'NOISE');
           confidence = probs[idx] ?? 0;
         }
 
-        fields.push({ lineIndex: li, start: s.start, end: s.end, text, fileStart, fileEnd, fieldType: assignedLabel, confidence });
+        lineFields.push({ lineIndex: li, start: s.start, end: s.end, text, fileStart, fileEnd, fieldType: assignedLabel, confidence });
+      }
+
+      // Either append to the last sub-entity (if same role) or start a new one
+      const last = subEntities[subEntities.length - 1];
+      if (last && last.entityType === role) {
+        // extend range
+        last.endLine = li;
+        last.fileEnd = (offsets[li] ?? 0) + ((lines[li]?.length) ?? 0);
+        // set entity-relative positions later; for now append fields
+        for (const f of lineFields) last.fields.push(f);
+      } else {
+        const fileStart = offsets[li] ?? 0;
+        const fileEnd = (offsets[li] ?? 0) + ((lines[li]?.length) ?? 0);
+        subEntities.push({ startLine: li, endLine: li, fileStart, fileEnd, entityType: role, fields: lineFields });
       }
     }
 
-    // entity file range
+    // set entity-relative positions for fields within each subEntity
+    for (const se of subEntities) {
+      const recFileStart = offsets[startLine] ?? 0;
+      for (const f of se.fields) {
+        f.entityStart = f.fileStart - recFileStart;
+        f.entityEnd = f.fileEnd - recFileStart;
+      }
+    }
+
     const fileStart = offsets[startLine] ?? 0;
     const fileEnd = (offsets[endLine] ?? 0) + ((lines[endLine]?.length) ?? 0);
 
-    // set entity-relative positions for fields
-    for (const f of fields) {
-      f.entityStart = f.fileStart - fileStart;
-      f.entityEnd = f.fileEnd - fileStart;
-    }
-
-    entities.push({ startLine, endLine, fileStart, fileEnd, entityType: joint[startLine]!.entityType, fields });
+    records.push({ startLine, endLine, fileStart, fileEnd, subEntities });
   }
 
-  return entities;
+  return records;
 }
 
 // --- New: accept feedback (asserted+removed spans) and fit weights via a scaled perceptron-like update ---
@@ -632,7 +656,7 @@ export function updateWeightsFromFeedback(
   lines: string[],
   spansPerLine: LineSpans[],
   joint: JointState[],
-  feedback: import('./types.js').Feedback,
+  feedback: Feedback,
   weights: Record<string, number>,
   lr = 1.0,
   enumerateOpts?: EnumerateOptions
@@ -744,6 +768,97 @@ export function updateWeightsFromFeedback(
   // the corresponding weighted delta ended up non-positive, attempt a targeted
   // nudge that is large enough to flip the score for the asserted span.
   const assertedFields = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+
+  // Special handling for removals: when the user requests removal of a specific
+  // span, they intend that span not be predicted anymore. The standard update
+  // based on reconstructing a 'gold' joint over the modified spans may produce
+  // no weight change (because the span is simply absent from the post-removal
+  // prediction). To make removals influence the detector weights we apply a
+  // targeted negative update per removed field. For each removed span we
+  // construct a minimal joint where the span is labeled by the removed field
+  // and another joint where it's NOISE; the difference (vGold - vPred) will be
+  // negative and will push weights away from features that favored the removed
+  // label.
+  for (const f of assertedFields.filter((x: any) => x.action === 'remove')) {
+    const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+    const origSpans = spansPerLine;
+    const si = (origSpans[li]?.spans ?? []).findIndex((x: any) => x.start === f.start && x.end === f.end);
+    if (si >= 0) {
+      // Choose a tight sub-span to focus the removal update on.
+      // If the user removed a broad span (e.g., an entire line) we try to
+      // localize to a phone/email/extid-like substring so feature detectors
+      // like `segment.is_phone` actually fire.
+      const origSpan = origSpans[li]!.spans[si]!;
+      let useStart = origSpan.start;
+      let useEnd = origSpan.end;
+      const lineText = lines[li] ?? '';
+      const candidateText = lineText.slice(useStart, useEnd);
+
+      if (f.fieldType === 'Phone') {
+        const m = candidateText.match(/[0-9()+\-\.\s]{7,}/);
+        if (m) {
+          const off = candidateText.indexOf(m[0]);
+          useStart = useStart + off;
+          useEnd = useStart + m[0].length;
+        }
+      } else if (f.fieldType === 'Email') {
+        const m = candidateText.match(/[^\s@]+@[^\s@]+\.[^\s@]{2,}/);
+        if (m) {
+          const off = candidateText.indexOf(m[0]);
+          useStart = useStart + off;
+          useEnd = useStart + m[0].length;
+        }
+      } else if (f.fieldType === 'ExtID') {
+        // try to find a token inside the candidate that looks like an ExtID
+        const toks = candidateText.split(/\s+/).filter(Boolean);
+        let acc = 0;
+        for (const tok of toks) {
+          const idx = candidateText.indexOf(tok, acc);
+          acc = idx + tok.length;
+          if (tok && tok.length <= 20 && /^[-_#A-Za-z0-9]+$/.test(tok) && !/^\d{10,11}$/.test(tok)) {
+            // treat as likely extid
+            const off = candidateText.indexOf(tok);
+            useStart = useStart + off;
+            useEnd = useStart + tok.length;
+            break;
+          }
+        }
+      }
+
+      // build spansSingle: keep only the (possibly tightened) target span on its line
+      const spansSingle: LineSpans[] = origSpans.map((s: LineSpans | undefined, idx: number) => {
+        if (idx !== li) return { lineIndex: idx, spans: [] } as LineSpans;
+        return { lineIndex: li, spans: [ { start: useStart, end: useEnd } ] } as LineSpans;
+      });
+
+      // Build two tiny joints: one where the candidate is the removed label, and
+      // one where it's NOISE (the desired state after removal).
+      const jointPred: JointState[] = spansSingle.map((s: LineSpans, idx: number) => {
+        if (idx !== li) return { boundary: 'C', fields: [] } as JointState;
+        return { boundary: 'C', fields: [ f.fieldType as FieldLabel ] } as JointState;
+      });
+      const jointGold: JointState[] = spansSingle.map((s: LineSpans, idx: number) => {
+        if (idx !== li) return { boundary: 'C', fields: [] } as JointState;
+        return { boundary: 'C', fields: [ 'NOISE' ] } as JointState;
+      });
+
+      const vPredSpan = extractFeatureVector(lines, spansSingle, jointPred);
+      const vGoldSpan = extractFeatureVector(lines, spansSingle, jointGold);
+
+      // Phone-specific debug removed
+
+      const keys = new Set<string>([...Object.keys(vPredSpan), ...Object.keys(vGoldSpan)]);
+      for (const k of keys) {
+        const delta = (vGoldSpan[k] ?? 0) - (vPredSpan[k] ?? 0);
+        const beforeVal = (weights[k] ?? 0);
+        // Use the field's confidence as the scaling factor for the removal
+        // update so users can provide weaker/stronger signals.
+        weights[k] = (weights[k] ?? 0) + lr * (f.confidence ?? 1.0) * delta;
+        const afterVal = weights[k];
+        // removal update diagnostic removed
+      }
+    }
+  }
 
   async function tryNudge(featureId: string, targetLabel: FieldLabel) {
     // find first asserted span with this label

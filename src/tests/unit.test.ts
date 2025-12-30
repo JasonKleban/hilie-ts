@@ -294,19 +294,38 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   console.log('✓ blank segments ignored and treated as absent');
 })();
 
-// Primary/Guardian adjacency and relationship inference
+// Primary/Guardian grouping into a top-level record with sub-entities
 (() => {
   const lines = ['John Doe', 'Sarah Doe (Parent)', 'Noise line'];
-  const joint: any = [ { boundary: 'B', fields: [] }, { boundary: 'B', fields: [] }, { boundary: 'C', fields: [] } ];
-  const annotated = annotateEntityTypes(lines, joint);
+  // create explicit spans for each line (start/end positions included)
+  const spans = lines.map((ln, i) => ({ lineIndex: i, spans: [{ start: 0, end: ln.length }] }));
 
-  ok(annotated[0]!.entityType === 'Primary', 'first line should be Primary');
-  ok(annotated[1]!.entityType === 'Guardian', 'second line should be Guardian');
+  // construct a joint that marks the first line as Primary and the second as Guardian
+  const joint: any = [
+    { boundary: 'B', fields: [], entityType: 'Primary' },
+    { boundary: 'C', fields: [], entityType: 'Guardian' },
+    { boundary: 'C', fields: [] }
+  ];
 
-  const rels = inferRelationships(annotated as any);
-  ok(rels.length === 1 && rels[0]!.primaryIndex === 0 && rels[0]!.guardianIndex === 1, 'relationship inferred');
+  const records = entitiesFromJoint(lines, spans as any, joint, undefined as any);
+  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJoint should return one top-level record');
 
-  console.log('✓ Primary/Guardian annotation and relationships');
+  const rec = records[0]!;
+  ok(Array.isArray(rec.subEntities) && rec.subEntities.length === 2, 'record should contain two sub-entities (Primary + Guardian)');
+
+  ok(rec.subEntities[0]!.entityType === 'Primary', 'first sub-entity should be Primary');
+  ok(rec.subEntities[1]!.entityType === 'Guardian', 'second sub-entity should be Guardian');
+
+  // Ensure span start/end positions and entity-relative positions are present
+  const allFields = rec.subEntities.flatMap(s => s.fields);
+  ok(allFields.length >= 1, 'record should contain fields in its sub-entities');
+  for (const f of allFields) {
+    ok(typeof f.start === 'number' && typeof f.end === 'number', 'field start/end positions present');
+    ok(typeof f.fileStart === 'number' && typeof f.fileEnd === 'number', 'file-relative positions present');
+    ok(typeof f.entityStart === 'number' && typeof f.entityEnd === 'number', 'entity-relative positions present');
+  }
+
+  console.log('✓ Primary/Guardian grouped into a single record with sub-entities');
 })();
 
 // 13) trainer generalization tests on real case files (case1, case3, case4)
@@ -433,17 +452,21 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const w: any = { 'segment.is_phone': 2.0, 'segment.is_email': 2.0, 'segment.is_extid': 2.0, 'segment.is_name': 1.0 };
   const joint = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
 
-  const entities = entitiesFromJoint(lines, spans, joint, w as any);
-  ok(Array.isArray(entities) && entities.length === 1, 'entitiesFromJoint should return one entity');
-  const ent = entities[0]!;
-  ok(ent.fields.length >= 1, 'entity should contain fields');
-  for (const f of ent.fields) {
+  const records = entitiesFromJoint(lines, spans, joint, w as any);
+  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJoint should return one top-level record');
+  const rec = records[0]!;
+  ok(Array.isArray(rec.subEntities) && rec.subEntities.length >= 1, 'record should contain sub-entities');
+
+  // flatten fields and check
+  const allFields = rec.subEntities.flatMap(s => s.fields);
+  ok(allFields.length >= 1, 'record should contain fields in its sub-entities');
+  for (const f of allFields) {
     ok(f.fileStart >= 0 && f.fileEnd > f.fileStart, 'field file-relative positions present');
     ok(f.entityStart !== undefined && f.entityEnd !== undefined, 'entity-relative positions present');
     ok(typeof (f.confidence ?? 0) === 'number', 'confidence present (numeric)');
   }
 
-  console.log('✓ entitiesFromJoint produced nested entity/field spans');
+  console.log('✓ entitiesFromJoint produced nested record/sub-entity field spans');
 
   // Feedback-driven weight update: assert the phone span should be Phone
   const lines2 = ['Contact: +1 555-123-4567'];
@@ -486,6 +509,9 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   // removal: ensure the asserted span was removed from the spans used for prediction
   ok(res.pred[0]!.fields.length === originalCount - 1, 'after remove feedback the predicted fields should reflect the removed span');
+
+  // Ensure removal produced a negative update to the phone detector weight
+  ok((w['segment.is_phone'] ?? 0) < (before['segment.is_phone'] ?? 0), 'feedback remove should decrease phone weight');
 
   console.log('✓ feedback remove action decreases weight and removes prediction');
 })();

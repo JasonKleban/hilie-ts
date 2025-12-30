@@ -104,20 +104,25 @@ export interface FieldSpan {
   confidence?: number | undefined;
 }
 
-export interface EntitySpan {
-  // containing lines
+// New: sub-entity and top-level record types
+export type SubEntityType = 'Primary' | 'Guardian' | 'Unknown';
+
+export interface SubEntitySpan {
   startLine: number;
   endLine: number;
-
-  // file-relative positions for entity
   fileStart: number;
   fileEnd: number;
-
-  // predicted entity type (Primary/Guardian/Unknown)
-  entityType?: EntityType | undefined;
-
-  // fields nested in this entity
+  entityType?: SubEntityType;
   fields: FieldSpan[];
+}
+
+export interface RecordSpan {
+  // top-level record contains one Primary and zero or more Guardian sub-entities
+  startLine: number;
+  endLine: number;
+  fileStart: number;
+  fileEnd: number;
+  subEntities: SubEntitySpan[];
 }
 
 export interface FieldAssertion extends Partial<FieldSpan> {
