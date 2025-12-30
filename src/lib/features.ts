@@ -1,5 +1,5 @@
 import type { Feature } from './types.js';
-import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyFullName, isLikelyPreferredName } from './validators.js';
+import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from './validators.js';
 
 function clamp(x: number, min = -1, max = 1): number {
   return Math.max(min, Math.min(max, x));
@@ -26,7 +26,7 @@ export const lexicalSimilarityDrop: Feature = {
   apply(ctx) {
     if (ctx.lineIndex === 0) return 0;
 
-    const tokenize = (s: string | undefined) => s?.toLowerCase().split(/\W+/).filter(Boolean) ?? [];
+    const tokenize = (s: string | undefined) => s?.toLowerCase().split(/\W+/).filter(Boolean);
 
     const a = new Set(tokenize(ctx.lines[ctx.lineIndex - 1]));
     const b = new Set(tokenize(ctx.lines[ctx.lineIndex]));
@@ -45,7 +45,9 @@ export const blankLine: Feature = {
   apply(ctx) {
     if (ctx.lineIndex === 0) return 0;
 
-    return (ctx.lines[ctx.lineIndex] ?? "").trim() === "" ? 1 : 0;
+    const line = ctx.lines[ctx.lineIndex]?.trim();
+
+    return !line || line === "" ? 1 : 0;
   }
 };
 
@@ -71,10 +73,10 @@ export const numericRatio: Feature = {
     if (!ctx.candidateSpan) return 0;
 
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]?.slice(start, end);
 
-    const digits = (text.match(/\d/g) ?? []).length;
-    const total = text.length || 1;
+    const digits = (text?.match(/\d/g))?.length ?? 0;
+    const total = text?.length || 1;
 
     return clamp(digits / total);
   }
@@ -85,7 +87,7 @@ export const segmentIsEmail: Feature = {
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]?.slice(start, end);
     return isLikelyEmail(text) ? 1 : 0;
   }
 };
@@ -95,7 +97,7 @@ export const segmentIsPhone: Feature = {
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]?.slice(start, end);
     return isLikelyPhone(text) ? 1 : 0;
   }
 };
@@ -106,9 +108,9 @@ export const tokenRepetitionScore: Feature = {
     if (!ctx.candidateSpan || !ctx.schemaStats) return 0;
 
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const token = (ctx.lines[lineIndex]?.slice(start, end) ?? '').trim();
+    const token = ctx.lines[lineIndex]?.slice(start, end)?.trim();
 
-    const freq = ctx.schemaStats.tokenFrequency[token] ?? 0;
+    const freq = token ? (ctx.schemaStats.tokenFrequency[token] ?? 0) : 0;
     const entityCount = ctx.schemaStats.entityCount || 1;
 
     return clamp(freq / entityCount);
@@ -121,10 +123,10 @@ export const delimiterContextIsolation: Feature = {
     if (!ctx.candidateSpan) return 0;
 
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const line = ctx.lines[lineIndex];
+    const line = ctx.lines[lineIndex]!;
 
-    const left = line?.[start - 1] ?? '';
-    const right = line?.[end] ?? '';
+    const left = line[start - 1]!;
+    const right = line[end]!;
 
     const score = (/\s/.test(left) ? 0.5 : 0) + (/\s/.test(right) ? 0.5 : 0);
 
@@ -163,7 +165,7 @@ export const segmentIsBirthdate: Feature = {
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]?.slice(start, end);
     return isLikelyBirthdate(text) ? 1 : 0;
   }
 };
@@ -173,23 +175,19 @@ export const segmentIsExtID: Feature = {
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]!.slice(start, end);
 
-    // prefer extids that appear near start of line
-    const line = ctx.lines[lineIndex] ?? '';
-    const posBias = Math.max(0, 1 - (start / Math.max(1, line.length))); // 1 near start, 0 at end
-
-    return isLikelyExtID(text) ? (0.8 + 0.2 * posBias) : 0;
+    return isLikelyExtID(text) ? (0.8 + 0.2) : 0;
   }
 };
 
-export const segmentIsFullName: Feature = {
-  id: 'segment.is_fullname',
+export const segmentIsName: Feature = {
+  id: 'segment.is_name',
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
-    return isLikelyFullName(text) ? 1 : 0;
+    const text = ctx.lines[lineIndex]?.slice(start, end);
+    return isLikelyName(text) ? 1 : 0;
   }
 };
 
@@ -198,7 +196,7 @@ export const segmentIsPreferredName: Feature = {
   apply(ctx) {
     if (!ctx.candidateSpan) return 0;
     const { lineIndex, start, end } = ctx.candidateSpan;
-    const text = ctx.lines[lineIndex]?.slice(start, end) ?? '';
+    const text = ctx.lines[lineIndex]?.slice(start, end);
     return isLikelyPreferredName(text) ? 1 : 0;
   }
 };
@@ -206,7 +204,7 @@ export const segmentIsPreferredName: Feature = {
 export const segmentFeatures: Feature[] = [
   // put stronger signals up-front so they influence decoding earlier
   segmentIsExtID,
-  segmentIsFullName,
+  segmentIsName,
   segmentIsPreferredName,
   segmentIsBirthdate,
   segmentIsEmail,
@@ -219,8 +217,120 @@ export const segmentFeatures: Feature[] = [
   optionalFieldPenalty
 ];
 
+export const leadingExtID: Feature = {
+  id: 'line.leading_extid',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    const m = line.trim().match(/^(#?\S+)/);
+    if (!m) return 0;
+    const token = m[1];
+    return isLikelyExtID(token) ? 1 : 0;
+  }
+};
+
+export const hasNameLikelihood: Feature = {
+  id: 'line.has_name',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    if (isLikelyName(line)) return 1;
+    // also detect Last, First style
+    if (/^[A-Za-z\-']+,\s*[A-Za-z\-']+/.test(line)) return 0.8;
+    return 0;
+  }
+};
+
+export const hasPreferredName: Feature = {
+  id: 'line.has_preferred',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    return isLikelyPreferredName(line) ? 1 : 0;
+  }
+};
+
+export const hasBirthdate: Feature = {
+  id: 'line.has_birthdate',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    return isLikelyBirthdate(line) ? 1 : 0;
+  }
+};
+
+export const hasColonLabel: Feature = {
+  id: 'line.has_label',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    if (/\b(Name|ID|DOB|Birthdate|Phone|Email):/i.test(line)) return 1;
+    return 0;
+  }
+};
+
+export const leadingStructural: Feature = {
+  id: 'line.leading_structural',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    if (/^\s*[*•o-]/.test(line)) return 1;
+    if (/^\s*\d+[\.)]/.test(line)) return 1;
+    return 0;
+  }
+};
+
+export const shortTokenCount: Feature = {
+  id: 'line.short_token_count',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+    const tokens = line.trim().split(/\s+/).filter(Boolean).length;
+    if (tokens <= 1) return 1;
+    if (tokens <= 3) return 0.6;
+    return 0;
+  }
+};
+
+export const nextHasContact: Feature = {
+  id: 'line.next_has_contact',
+  apply(ctx) {
+    const next = ctx.lines[ctx.lineIndex + 1] ?? '';
+    if (!next) return 0;
+    if (isLikelyPhone(next) || isLikelyEmail(next)) return 1;
+    return 0;
+  }
+};
+
+export const primaryLikely: Feature = {
+  id: 'line.primary_likely',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+
+    // leading numeric id, 'ID:' label, comma-separated Last, First, or table-like pipes
+    if (/^\s*\d+\b/.test(line) || /\bID:/i.test(line) || /^\s*[A-Za-z]+,\s*[A-Za-z]+/.test(line) || /\|/.test(line)) return 1;
+    return 0;
+  }
+};
+
+export const guardianLikely: Feature = {
+  id: 'line.guardian_likely',
+  apply(ctx) {
+    const line = ctx.lines[ctx.lineIndex] ?? '';
+
+    if (/\bparent\b|\bguardian\b|\bmom\b|\bdad\b|\bfather\b|\bmother\b/i.test(line)) return 1;
+    // outline bullets with 'Parent'
+    if (/^\s*[*•o-]\s*Parent/i.test(line)) return 1;
+    return 0;
+  }
+};
+
 export const boundaryFeatures: Feature[] = [
-  indentationDelta, 
+  // order important: stronger signals first
+  leadingExtID,
+  hasNameLikelihood,
+  hasPreferredName,
+  hasBirthdate,
+  hasColonLabel,
+  leadingStructural,
+  shortTokenCount,
+  nextHasContact,
+  indentationDelta,
   lexicalSimilarityDrop,
-  blankLine
+  blankLine,
+  primaryLikely,
+  guardianLikely
 ];

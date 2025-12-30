@@ -1,16 +1,9 @@
-import { strict as assert } from 'node:assert';
 import { spanGenerator } from '../lib/utils.js';
-import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample } from '../lib/viterbi.js';
-import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyFullName, isLikelyPreferredName } from '../lib/validators.js';
+import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, annotateEntityTypes, inferRelationships } from '../lib/viterbi.js';
+import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
 
 function ok(cond: boolean, msg?: string) {
   if (!cond) throw new Error(msg || 'ok failed');
-}
-
-function deepEqual(a: any, b: any, msg?: string) {
-  const sa = JSON.stringify(a);
-  const sb = JSON.stringify(b);
-  if (sa !== sb) throw new Error(msg || `deepEqual failed: ${sa} !== ${sb}`);
 }
 
 console.log('Unit tests: spanGenerator & enumerateStates');
@@ -106,8 +99,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(!isLikelyExtID('1234567890'), '10-digit-only is treated as phone-ish / ambiguous');
 
   // name heuristics
-  ok(isLikelyFullName('William Rojas'), 'two-token capitalized name recognized');
-  ok(isLikelyFullName('Rojas, William'), 'Last, First recognized');
+  ok(isLikelyName('William Rojas'), 'two-token capitalized name recognized');
+  ok(isLikelyName('Rojas, William'), 'Last, First recognized');
   ok(isLikelyPreferredName('"Billy"'), 'quoted preferred name recognized');
   ok(isLikelyPreferredName('(Billy)'), 'parenthesized preferred name recognized');
 
@@ -150,7 +143,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const weights = {
     'segment.is_extid': 6.0,
-    'segment.is_fullname': 6.0,
+    'segment.is_name': 6.0,
     'segment.is_preferred_name': 6.0,
     'segment.is_birthdate': 8.0,
     'segment.is_phone': 10.0
@@ -161,7 +154,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   // Line 0 should include an ExtID and a FullName/PreferredName assignment on some spans
   const line0 = joint[0]!.fields;
   const hasExtID = line0.some(f => f === 'ExtID');
-  const hasFullOrPref = line0.some(f => f === 'FullName' || f === 'PreferredName');
+  const hasFullOrPref = line0.some(f => f === 'Name' || f === 'PreferredName');
   ok(hasExtID, 'decoder should assign ExtID on the first line where present');
   ok(hasFullOrPref, 'decoder should assign FullName or PreferredName on the first line');
 
@@ -186,8 +179,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const goldState: any = { boundary: 'B', fields: ['ExtID', 'NOISE', 'Phone'] };
   const gold = [goldState];
 
-  // small initial weights
-  const w: Record<string, number> = { 'segment.is_phone': 0.1, 'segment.token_count_bucket': 0.1 };
+  // small initial weights (bias away from phone so trainer must increase it)
+  const w: Record<string, number> = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
 
   const before = { ...w };
   console.log('DEBUG spans2:', JSON.stringify(spans2, null, 2));
@@ -210,6 +203,69 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok((vf['segment.is_phone'] ?? 0) >= (vp['segment.is_phone'] ?? 0), 'gold feature count should be >= pred for phone');
 
   console.log('✓ trainer feature extraction and weight update');
+})();
+
+// Boundary feature tests: ensure new line-level features can drive boundaries
+(() => {
+  // Leading ExtID should favor a boundary at the line start
+  const lines = ['#A123 John Doe', '410-555-1212', 'john@example.com'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
+
+  const weights: any = { 'line.leading_extid': 12.0, 'line.has_name': 6.0, 'line.short_token_count': 2.0, 'segment.is_phone': 4.0, 'segment.is_email': 4.0 };
+
+  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
+  console.log('DEBUG leadingExtID joint:', JSON.stringify(joint, null, 2));
+  ok(joint[0]!.boundary === 'B', 'leading ExtID should produce a Boundary B');
+
+  // Birthdate-only line should be recognized as boundary
+  const lines2 = ['05/12/2013', 'John Doe', '410-555-1234'];
+  const spans2 = spanGenerator(lines2, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
+  const weights2: any = { 'line.has_birthdate': 6.0, 'segment.is_phone': 3.0 };
+
+  const joint2 = jointViterbiDecode(lines2, spans2, weights2, { maxStates: 256 });
+  ok(joint2[0]!.boundary === 'B', 'birthdate line should be treated as a Boundary');
+
+  // Next line contact hint: preceding line with nextHasContact set should prefer B
+  const lines3 = ['John Doe', '410-555-9876'];
+  const spans3 = spanGenerator(lines3, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
+  const weights3: any = { 'line.next_has_contact': 6.0, 'segment.is_phone': 6.0 };
+
+  const joint3 = jointViterbiDecode(lines3, spans3, weights3, { maxStates: 256 });
+  ok(joint3[0]!.boundary === 'B', 'line preceding contact should be Boundary');
+
+  console.log('✓ boundary features influence decoding');
+})();
+
+// Blank/empty-segment handling should ignore empty columns and not explode
+(() => {
+  const line = 'John\t\t\t\t\t\t\t\t\t\t410-555-1212';
+  const lines = [line];
+  const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
+
+  // expect that empty tab-separated columns are ignored and we still get a small number of spans
+  ok(spans[0]!.spans.length <= 4, 'empty segments are ignored by spanGenerator');
+
+  // joint decode should run without error and prefer Phone on the phone span
+  const weights: any = { 'segment.is_phone': 5.0 };
+  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
+  ok(joint.length === 1, 'single-line joint produced');
+
+  console.log('✓ blank segments ignored and treated as absent');
+})();
+
+// Primary/Guardian adjacency and relationship inference
+(() => {
+  const lines = ['John Doe', 'Sarah Doe (Parent)', 'Noise line'];
+  const joint: any = [ { boundary: 'B', fields: [] }, { boundary: 'B', fields: [] }, { boundary: 'C', fields: [] } ];
+  const annotated = annotateEntityTypes(lines, joint);
+
+  ok(annotated[0]!.entityType === 'Primary', 'first line should be Primary');
+  ok(annotated[1]!.entityType === 'Guardian', 'second line should be Guardian');
+
+  const rels = inferRelationships(annotated as any);
+  ok(rels.length === 1 && rels[0]!.primaryIndex === 0 && rels[0]!.guardianIndex === 1, 'relationship inferred');
+
+  console.log('✓ Primary/Guardian annotation and relationships');
 })();
 
 console.log('All unit tests passed.');

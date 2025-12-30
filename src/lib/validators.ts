@@ -1,5 +1,5 @@
 // Lightweight validators for email and phone (no external deps)
-export function isLikelyEmail(s: string): boolean {
+export function isLikelyEmail(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
   // Pragmatic, permissive regex that covers most real emails (not full RFC 5322)
@@ -7,7 +7,7 @@ export function isLikelyEmail(s: string): boolean {
   return emailRegex.test(t);
 }
 
-export function isLikelyPhone(s: string): boolean {
+export function isLikelyPhone(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
   // Allow digits, common separators and extensions
@@ -18,7 +18,7 @@ export function isLikelyPhone(s: string): boolean {
 }
 
 // New: detect birthdate-ish strings (MM/DD/YYYY, YYYY-MM-DD, Month D, YYYY, etc.)
-export function isLikelyBirthdate(s: string): boolean {
+export function isLikelyBirthdate(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
   // Common patterns: 05/12/2008, 5/12/08, 2008-05-12, May 12, 2008, 12 May 2008
@@ -31,7 +31,7 @@ export function isLikelyBirthdate(s: string): boolean {
 }
 
 // ExtID heuristics: numeric or alphanumeric possibly prefixed with '#', shorter token, often near beginning
-export function isLikelyExtID(s: string): boolean {
+export function isLikelyExtID(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
   // Remove common labels like 'ID:' or 'ID' prefix
@@ -45,17 +45,17 @@ export function isLikelyExtID(s: string): boolean {
 }
 
 // Full name heuristic: two or three capitalized words or 'Last, First' forms
-export function isLikelyFullName(s: string): boolean {
+export function isLikelyName(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
-  if (/^[A-Za-z]+,\s*[A-Za-z]+/.test(t)) return true; // Last, First
+  if (/^[A-ZÁÉÍÓÚÜÑÉÈÊÇÂÎÔÛÜŒ]+,\s*[A-Z]+/i.test(t)) return true; // Last, First
   const parts = t.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2 && parts.length <= 4 && parts.every(p => /^[A-Z][a-z\-']+$/.test(p))) return true;
+  if (parts.length >= 1 && parts.length <= 4 && parts.every(p => /^[A-ZÁÉÍÓÚÜÑÉÈÊÇÂÎÔÛÜŒ][a-z\-'áéíóúüñéèêçâîôûüœ]+$/.test(p))) return true;
   return false;
 }
 
 // Preferred name detection: quoted or parenthesized nickname/preferred name
-export function isLikelyPreferredName(s: string): boolean {
+export function isLikelyPreferredName(s: string | undefined): boolean {
   if (!s) return false;
   const t = s.trim();
   if (/\".+\"/.test(t) || /\(.+\)/.test(t)) return true;

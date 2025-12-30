@@ -30,7 +30,7 @@ export interface Feature {
 export type BoundaryState = "B" | "C";
 export type FieldLabel =
   | 'ExtID'
-  | 'FullName'
+  | 'Name'
   | 'PreferredName'
   | 'Phone'
   | 'Email'
