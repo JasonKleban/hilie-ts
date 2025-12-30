@@ -48,12 +48,7 @@ async function runDataDrivenTests() {
       'field.optional_penalty': -0.4
     } as Record<string, number>;
 
-    // Use the more robust span generator by default
     const spansPerLine = spanGenerator(lines);
-
-    // for (var line of spansPerLine) {
-    //   console.info(line.lineIndex, line.spans);
-    // }
 
     const joint = jointViterbiDecode(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
 
