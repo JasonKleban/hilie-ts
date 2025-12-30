@@ -74,7 +74,8 @@ async function main() {
 
 main()
 .then(people => {
-  //console.log(people);
+
+  // CASE 3
 
   for(let person of people) {
     const guardians = person.guardians.map(g => [
@@ -109,6 +110,8 @@ main()
   console.log();
   console.log();
 
+  // CASE 4
+
   for(let person of people) {
 
     const row = [
@@ -140,6 +143,44 @@ main()
 
     for(let guardian of guardians) {
       console.log("\t\t" + guardian);
+    }
+  }
+
+  console.log();
+  console.log();
+  console.log();
+
+  // CASE 1
+
+  for(let person of people) {
+
+    console.log(person.PreferredName 
+      ? `\n${person.FirstName} "${person.PreferredName}" ${person.FirstName} (${person.StudentID})`
+      : `\n${person.FullName} (${person.StudentID})`);
+
+    console.log('\t* ' + [
+      person.Phone?.join('\n\t* '),
+      person.Email?.join('\n\t* '),
+      person.Languages?.join(', '),
+      person.GeneralNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t'),
+      person.MedicalNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t'),
+      person.DietaryNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t'),
+      person.Birthdate
+    ].filter(Boolean).join('\n\t* '));
+
+    for(let guardian of person.guardians) {
+      console.log(guardian.Person.PreferredName 
+        ? `\t* ${guardian.Person.FirstName} "${guardian.Person.PreferredName}" ${guardian.Person.FirstName} (${guardian.GuardianRole})`
+        : `\t* ${guardian.Person.FullName} (${guardian.GuardianRole})`);
+
+      console.log('\t\t* ' + [
+        guardian.Person.Phone?.join('\n\t\t* '),
+        guardian.Person.Email?.join('\n\t\t* '),
+        guardian.Person.Languages?.join(', '),
+        guardian.Person.GeneralNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t\t'),
+        guardian.Person.MedicalNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t\t'),
+        guardian.Person.DietaryNotes?.replace(/\r?\n$/g, '').replace(/\r?\n/g, '\n\t\t\t')
+      ].filter(Boolean).join('\n\t\t* '));
     }
   }
 })

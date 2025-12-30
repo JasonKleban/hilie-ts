@@ -143,6 +143,7 @@
       "PersonID": 15,
       "StudentID": "LN7VBS6V",
       "FirstName": "Harper",
+      "PreferredName": "Harp",
       "LastName": "Smith",
       "FullName": "Harper Smith",
       "Birthdate": "2014-09-05",
@@ -291,6 +292,7 @@
       "PersonID": 31,
       "StudentID": "7ZHB4S9B",
       "FirstName": "Benjamin",
+      "PreferredName": "Ben",
       "LastName": "Johnson",
       "FullName": "Benjamin Johnson",
       "Birthdate": "2014-01-18"
