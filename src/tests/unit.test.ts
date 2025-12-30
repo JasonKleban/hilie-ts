@@ -1,6 +1,7 @@
-import { spanGenerator } from '../lib/utils.js';
+import { spanGenerator, detectDelimiter } from '../lib/utils.js';
 import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, annotateEntityTypes, inferRelationships } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
+import { readFileSync } from 'fs';
 
 function ok(cond: boolean, msg?: string) {
   if (!cond) throw new Error(msg || 'ok failed');
@@ -107,6 +108,55 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   console.log('✓ email, phone, birthdate, extid & name validators');
 })();
 
+// 14) delimiter detection: auto-detect delimiter for case files
+(() => {
+  const txtCase1 = readFileSync('src/tests/data/case1.txt', 'utf8');
+  const blocks1 = txtCase1.split(/\n\s*\n+/).map(s => s.trim()).filter(Boolean);
+  ok(blocks1.length > 0, 'case1 blocks present');
+  const blockLines = blocks1[0]!.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const rx1 = detectDelimiter(blockLines);
+  ok(/\\s\{2,\}/.test(rx1.source) || /\\s\+/.test(rx1.source), 'case1 should detect multi-space/whitespace delimiter');
+
+  const txtCase3 = readFileSync('src/tests/data/case3.txt', 'utf8');
+  const lines3 = txtCase3.split(/\r?\n/).slice(0, 10).map(s => s.trim()).filter(Boolean);
+  const rx3 = detectDelimiter(lines3);
+  ok(/\\t/.test(rx3.source), 'case3 should detect tab delimiter');
+
+  const txtCase4 = readFileSync('src/tests/data/case4.txt', 'utf8');
+  const lines4 = txtCase4.split(/\r?\n/).slice(0, 10).map(s => s.trim()).filter(Boolean);
+  const rx4 = detectDelimiter(lines4);
+  ok(/\\t/.test(rx4.source), 'case4 should detect tab delimiter');
+
+  // bullet/outline detection: leading bullets with multi-space columns
+  (() => {
+    const bulletLines = [
+      '- 45NUMBEU  Henry Johnson    Eats most school meals.....Avoids overly spicy foods.    5/4/2014',
+      '- 6XPT2V4S  Mia Brown        Boundary: B',
+      '- 9FTNQAQA  Alexander Davis  Boundary: B'
+    ];
+    const rxb = detectDelimiter(bulletLines);
+    ok(/\\s\{2,\}/.test(rxb.source) || /\\s\+/.test(rxb.source) || /\\t/.test(rxb.source), 'bullet-outline should detect whitespace/tab delimiter');
+  })();
+
+  // numbered bullets with tabs inside lines should detect tab (or whitespace)
+  (() => {
+    const numLines = [
+      '1. 45NUMBEU\tHenry Johnson\tEats most school meals.....\t5/4/2014',
+      '2. 6XPT2V4S\tMia Brown\tBoundary: B'
+    ];
+    const rxn = detectDelimiter(numLines);
+    ok(/\\t/.test(rxn.source) || /\\s\{2,\}/.test(rxn.source), 'numbered-outline with tabs should detect tab or multi-space');
+  })();
+
+  // also ensure spanGenerator default (auto) uses detected delimiter and returns meaningful spans
+  const spans1 = spanGenerator(blockLines, {} as any);
+  ok(spans1.length === blockLines.length, 'spanGenerator auto for case1 returns spans for each line');
+  const spans3 = spanGenerator(lines3, {} as any);
+  ok(spans3.length === lines3.length, 'spanGenerator auto for case3 returns spans for each line');
+
+  console.log('✓ delimiter detection (case1, case3, case4)');
+})();
+
 // 9) segment features influence decoding: prefer Phone/Email when detected
 (() => {
 
@@ -183,15 +233,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const w: Record<string, number> = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
 
   const before = { ...w };
-  console.log('DEBUG spans2:', JSON.stringify(spans2, null, 2));
-  console.log('DEBUG span texts:', spans2[0]!.spans.map(s => lines2[0]!.slice(s.start, s.end)));
-  console.log('DEBUG isLikelyPhone per span:', spans2[0]!.spans.map(s => ({ text: lines2[0]!.slice(s.start, s.end), ok: isLikelyPhone(lines2[0]!.slice(s.start, s.end)) })));
 
   const res = updateWeightsFromExample(lines2, spans2, gold, w, 1.0, { maxStates: 64 });
-
-  console.log('DEBUG trainer before weights:', before);
-  console.log('DEBUG trainer after weights:', w);
-  console.log('DEBUG pred state:', res.pred);
 
   // after training, weight for 'segment.is_phone' should increase (positive update)
   ok((w['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'training should increase phone feature weight');
@@ -199,7 +242,6 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   // extractFeatureVector sanity: gold vector produces higher phone-related contribution
   const vf = extractFeatureVector(lines2, spans2, gold);
   const vp = extractFeatureVector(lines2, spans2, res.pred);
-  console.log('DEBUG vf:', vf, 'vp:', vp);
   ok((vf['segment.is_phone'] ?? 0) >= (vp['segment.is_phone'] ?? 0), 'gold feature count should be >= pred for phone');
 
   console.log('✓ trainer feature extraction and weight update');
@@ -214,7 +256,6 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const weights: any = { 'line.leading_extid': 12.0, 'line.has_name': 6.0, 'line.short_token_count': 2.0, 'segment.is_phone': 4.0, 'segment.is_email': 4.0 };
 
   const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
-  console.log('DEBUG leadingExtID joint:', JSON.stringify(joint, null, 2));
   ok(joint[0]!.boundary === 'B', 'leading ExtID should produce a Boundary B');
 
   // Birthdate-only line should be recognized as boundary
@@ -266,6 +307,123 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(rels.length === 1 && rels[0]!.primaryIndex === 0 && rels[0]!.guardianIndex === 1, 'relationship inferred');
 
   console.log('✓ Primary/Guardian annotation and relationships');
+})();
+
+// 13) trainer generalization tests on real case files (case1, case3, case4)
+(() => {
+
+  function getRecordsFromFile(path: string, mode: 'block' | 'line') {
+    const txt: string = readFileSync(path, 'utf8');
+    if (mode === 'block') {
+      return txt.split(/\n(\s*\n)+\w/).map(s => s.trim()).filter(Boolean);
+    } else {
+      return txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    }
+  }
+
+  function makeGoldFromSpans(lines: string[], spans: any[], idx: number) {
+    const fields = spans[idx]!.spans.map((s: any) => {
+      const text = lines[idx]!.slice(s.start, s.end).trim();
+      if (isLikelyExtID(text)) return 'ExtID';
+      if (isLikelyBirthdate(text)) return 'Birthdate';
+      if (isLikelyPhone(text)) return 'Phone';
+      if (isLikelyEmail(text)) return 'Email';
+      if (isLikelyPreferredName(text)) return 'PreferredName';
+      if (isLikelyName(text)) return 'Name';
+      return 'NOISE';
+    });
+    return { boundary: 'B', fields };
+  }
+
+  const cases = [
+    { path: 'src/tests/data/case1.txt', mode: 'block', errPrefix: 'case1' },
+    { path: 'src/tests/data/case3.txt', mode: 'line', errPrefix: 'case3' },
+    { path: 'src/tests/data/case4.txt', mode: 'line', errPrefix: 'case4' }
+  ];
+
+  for (const c of cases) {
+    const records = getRecordsFromFile(c.path, c.mode as any);
+    ok(records.length >= 3, `${c.errPrefix}: need at least 3 records`);
+
+    const firstThree = records.slice(0, 3);
+
+    // Choose delimiter heuristically
+    const delim = c.mode === 'line' ? /\t/ : /(\r\n)+|\n+|\s+|\b/;
+    const spans = spanGenerator(firstThree, { delimiterRegex: delim, maxTokensPerSpan: 12 });
+
+    // initial weights (mild biases)
+    const w: any = { 'segment.is_phone': -2.0, 'segment.is_extid': 0.5, 'segment.is_name': 0.5 };
+
+    const gold0 = makeGoldFromSpans(firstThree, spans, 0);
+
+    console.log(`gold0 for ${c.errPrefix}:`, JSON.stringify(gold0, null, 2));
+
+    const gold = [gold0, 
+      { boundary: 'B', fields: spans[1]!.spans.map((_) => 'NOISE') }, 
+      { boundary: 'B', fields: spans[2]!.spans.map((_) => 'NOISE') }];
+
+    const predBefore = jointViterbiDecode(firstThree, spans, { ...w }, { maxStates: 512 });
+
+    // ensure our initial guess may be imperfect (not exactly gold)
+    // const matchesBefore = predBefore[0]!.fields.every((f: string, i: number) => f === gold0.fields[i]);
+
+    // Run a few epochs training on first record only
+    for (let epoch = 0; epoch < 5; epoch++) {
+      // cast gold to any to satisfy test typing convenience
+      updateWeightsFromExample(firstThree, spans, gold as any, w, 1.0, { maxStates: 512 });
+    }
+
+    console.log('TRAINED weights for', c.errPrefix, JSON.stringify(w, null, 2));
+
+    const jointAfter = jointViterbiDecode(firstThree, spans, w, { maxStates: 512 });
+
+    // After training, first record should match gold on at least the primary non-NOISE labels
+    const expectedSet = new Set(gold0.fields.filter((x: string) => x !== 'NOISE'));
+    const afterHasExpected = jointAfter[0]!.fields.some((f: string) => expectedSet.has(f));
+    ok(afterHasExpected, `${c.errPrefix}: after training, prediction should include at least one expected label for first record`);
+
+    // For the remaining two records, ensure decoder picks at least one of the expected labels inferred heuristically
+    for (let i = 1; i <= 2; i++) {
+      const expectedI = makeGoldFromSpans(firstThree, spans, i);
+      const expectedSetI = new Set(expectedI.fields.filter((x: string) => x !== 'NOISE'));
+      if (expectedSetI.size > 0) {
+        const hasSome = jointAfter[i]!.fields.some((f: string) => expectedSetI.has(f));
+        ok(hasSome, `${c.errPrefix} record ${i}: decoder should pick at least one expected label (${[...expectedSetI].join(',')})`);
+      }
+    }
+
+    console.log(`✓ trainer generalization ${c.errPrefix}`);
+  }
+
+})();
+
+// 12) trainer harness: multi-iteration training should consistently improve weights and predictions
+(() => {
+  const lines = ['Contact: +1 555-123-4567'];
+  const spans = spanGenerator(lines, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
+
+  // gold state insists that the phone-like span should be labeled Phone
+  const goldState: any = { boundary: 'B', fields: ['ExtID', 'NOISE', 'Phone'] };
+  const gold = [goldState];
+
+  const w: Record<string, number> = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
+  const beforeWeight = w['segment.is_phone'] ?? 0;
+
+  // run multiple epochs over the single example (simulates repeated feedback)
+  for (let epoch = 0; epoch < 6; epoch++) {
+    const r = updateWeightsFromExample(lines, spans, gold, w, 1.0, { maxStates: 64 });
+    // ensure updateWeightsFromExample returns a pred and doesn't throw
+    ok(Array.isArray(r.pred), 'trainer returned a prediction each epoch');
+  }
+
+  // weight should have increased after multiple updates
+  ok((w['segment.is_phone'] ?? 0) > beforeWeight, 'multi-epoch training should increase phone feature weight');
+
+  // decoder should now prefer Phone on this example
+  const jointAfter = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+  ok(jointAfter[0]!.fields.some(f => f === 'Phone'), 'after multi-epoch training the decoder should pick Phone');
+
+  console.log('✓ multi-iteration trainer harness improves phone weight and prediction');
 })();
 
 console.log('All unit tests passed.');

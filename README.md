@@ -5,7 +5,7 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 ## Concepts
 
 - **Lines & Spans**: Input text is processed line-by-line. For each line we may propose candidate spans (token/group positions) representing potential fields.
-  - Code: `LineSpans`, `naiveSpanGenerator` (`src/lib/utils.ts`)
+  - Code: `LineSpans`, (`src/lib/utils.ts`)
 
 - **Features**: A set of small, interpretable feature functions that score properties of lines and spans. They are grouped as:
   - *Boundary features* (e.g., indentation change, lexical similarity drop) used to detect record boundaries — `src/lib/features.ts` (`boundaryFeatures`).
@@ -21,14 +21,14 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 
 - `src/lib/features.ts` implements feature primitives and exposes `segmentFeatures` and `boundaryFeatures` arrays used by the decoders.
 - `src/lib/viterbi.ts` implements core DP routines and supporting helpers (emission, transition scoring, enumerate states).
-- `src/lib/utils.ts` contains small utility helpers like `naiveSpanGenerator` and a more flexible `spanGenerator` used in tests and demos.
+- `src/lib/utils.ts` contains small utility helpers `spanGenerator` used in tests and demos.
 
 **`spanGenerator`**
 - A more robust span proposal function that:
   - Splits lines by common delimiters (pipes, commas, semicolons, tabs, or runs of spaces) by default
   - Produces token n-gram spans (up to a configurable window size)
   - Falls back to word token spans if no delimiters are found
-- Use by replacing calls to `naiveSpanGenerator(lines)` with `spanGenerator(lines, { /* options */ })` where options are optional.
+- Use by replacing calls to `spanGenerator(lines, { /* options */ })` where options are optional.
 - `src/index.ts` re-exports the public API for convenience.
 
 ## Quick usage
@@ -43,7 +43,7 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 
 3. Use in your code:
 
-   import { jointViterbiDecode, naiveSpanGenerator } from 'hilie-ts';
+   import { jointViterbiDecode } from 'hilie-ts';
 
 ## Roadmap / TODOs
 

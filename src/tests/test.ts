@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { jointViterbiDecode, spanGenerator, naiveSpanGenerator } from '../index.js';
+import { jointViterbiDecode, spanGenerator } from '../index.js';
 
 async function runDataDrivenTests() {
   let files: string[] = [];
