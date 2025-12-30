@@ -117,9 +117,9 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
     maxStates: opts?.maxStates ?? 2048
   };
 
-  const fieldLabels: string[] = ['ExtID', 'FullName', 'PreferredName', 'Phone', 'Email', 'GeneralNotes', 'MedicalNotes', 'DietaryNotes', 'Birthdate', 'NOISE'];
+  const fieldLabels: string[] = ['ExtID', 'Name', 'PreferredName', 'Phone', 'Email', 'GeneralNotes', 'MedicalNotes', 'DietaryNotes', 'Birthdate', 'NOISE'];
 
-  const repeatable = new Set(['Phone', 'Email']);
+  const repeatable = new Set(['Name', 'Phone', 'Email']);
 
   // To avoid exponential blowup, only enumerate over an initial prefix when the span count is large.
   const SAFE_PREFIX = options.safePrefix;
@@ -297,49 +297,4 @@ export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpan
   }
 
   return { updated: weights, pred };
-}
-
-// Heuristic entity-type detection (post-decode)
-export function annotateEntityTypes(lines: string[], joint: JointState[]): JointState[] {
-  return joint.map((state, idx) => {
-    const line = lines[idx] ?? '';
-    const fields = state.fields;
-
-    // Guardian heuristics: explicit tokens
-    if (/\bparent\b|\bguardian\b/i.test(line)) {
-      return { ...state, entityType: 'Guardian' };
-    }
-
-    // Primary heuristics: leading numeric ID or comma-separated Last, First
-    if (/^\s*\d+\b/.test(line) || /^\s*[A-Za-z]+,\s*[A-Za-z]+/.test(line)) {
-      return { ...state, entityType: 'Primary' };
-    }
-
-    // If fields looks like multiple populated fields (F1 and F2 non-NOISE), prefer Primary
-    const nonNoise = fields.filter(f => f !== 'NOISE').length;
-    if (nonNoise >= 2) return { ...state, entityType: 'Primary' };
-
-    return { ...state, entityType: 'Unknown' };
-  });
-}
-
-export function inferRelationships(joint: JointState[]): Relationship[] {
-  const rels: Relationship[] = [];
-
-  // Build index of primary lines
-  const primaries = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Primary');
-  const guardians = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Guardian');
-
-  // Simple heuristic: assign each guardian to the nearest preceding primary within 6 lines
-  for (const g of guardians) {
-    let closest: { s: JointState; i: number } | null = null;
-    for (const p of primaries) {
-      if (p.i <= g.i && (closest === null || g.i - p.i < g.i - closest.i)) closest = p;
-    }
-    if (closest && g.i - closest.i <= 6) {
-      rels.push({ primaryIndex: closest.i, guardianIndex: g.i });
-    }
-  }
-
-  return rels;
 }

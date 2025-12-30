@@ -39,6 +39,7 @@ async function runDataDrivenTests() {
     const jointWeights = {
       'line.indentation_delta': 0.5,
       'line.lexical_similarity_drop': 1.0,
+      'line.blank_line': 1.0,
       'segment.token_count_bucket': 0.8,
       'segment.numeric_ratio': 1.2,
       'segment.is_email': 2.0,

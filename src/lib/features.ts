@@ -40,6 +40,15 @@ export const lexicalSimilarityDrop: Feature = {
   }
 };
 
+export const blankLine: Feature = {
+  id: 'line.blank_line',
+  apply(ctx) {
+    if (ctx.lineIndex === 0) return 0;
+
+    return (ctx.lines[ctx.lineIndex] ?? "").trim() === "" ? 1 : 0;
+  }
+};
+
 export const tokenCountBucket: Feature = {
   id: 'segment.token_count_bucket',
   apply(ctx) {
@@ -120,30 +129,6 @@ export const delimiterContextIsolation: Feature = {
     const score = (/\s/.test(left) ? 0.5 : 0) + (/\s/.test(right) ? 0.5 : 0);
 
     return score;
-  }
-};
-
-// New heuristics to help the decoder prefer Primary vs Guardian boundaries
-export const primaryLikely: Feature = {
-  id: 'line.primary_likely',
-  apply(ctx) {
-    const line = ctx.lines[ctx.lineIndex] ?? '';
-
-    // leading numeric id, 'ID:' label, comma-separated Last, First, or table-like pipes
-    if (/^\s*\d+\b/.test(line) || /\bID:/i.test(line) || /^\s*[A-Za-z]+,\s*[A-Za-z]+/.test(line) || /\|/.test(line)) return 1;
-    return 0;
-  }
-};
-
-export const guardianLikely: Feature = {
-  id: 'line.guardian_likely',
-  apply(ctx) {
-    const line = ctx.lines[ctx.lineIndex] ?? '';
-
-    if (/\bparent\b|\bguardian\b|\bmom\b|\bdad\b|\bfather\b|\bmother\b/i.test(line)) return 1;
-    // outline bullets with 'Parent'
-    if (/^\s*[*•o-]\s*Parent/i.test(line)) return 1;
-    return 0;
   }
 };
 
@@ -233,4 +218,9 @@ export const segmentFeatures: Feature[] = [
   relativePositionConsistency,
   optionalFieldPenalty
 ];
-export const boundaryFeatures: Feature[] = [indentationDelta, lexicalSimilarityDrop, primaryLikely, guardianLikely];
+
+export const boundaryFeatures: Feature[] = [
+  indentationDelta, 
+  lexicalSimilarityDrop,
+  blankLine
+];
