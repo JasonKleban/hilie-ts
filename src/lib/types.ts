@@ -82,3 +82,61 @@ export interface LineSpans {
     end: number;
   }[];
 }
+
+// Richer span and entity types for external API
+export interface FieldSpan {
+  // line relative positions
+  lineIndex: number;
+  start: number;
+  end: number;
+  text: string;
+
+  // file-relative positions (character offsets)
+  fileStart: number;
+  fileEnd: number;
+
+  // entity-relative positions (character offsets relative to entity start)
+  entityStart?: number;
+  entityEnd?: number;
+
+  // assigned label and confidence (0..1)
+  fieldType?: FieldLabel | undefined;
+  confidence?: number | undefined;
+}
+
+export interface EntitySpan {
+  // containing lines
+  startLine: number;
+  endLine: number;
+
+  // file-relative positions for entity
+  fileStart: number;
+  fileEnd: number;
+
+  // predicted entity type (Primary/Guardian/Unknown)
+  entityType?: EntityType | undefined;
+
+  // fields nested in this entity
+  fields: FieldSpan[];
+}
+
+export interface FieldAssertion extends Partial<FieldSpan> {
+  // action: 'add' to assert new span; 'remove' to remove an existing span
+  action?: 'add' | 'remove';
+  // asserted confidence (0..1)
+  confidence?: number;
+}
+
+export interface EntityAssertion {
+  startLine?: number;
+  endLine?: number;
+  fileStart?: number;
+  fileEnd?: number;
+  entityType?: EntityType;
+  fields?: FieldAssertion[];
+}
+
+export interface Feedback {
+  // list of asserted entity-level edits
+  entities: EntityAssertion[];
+}

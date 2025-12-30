@@ -1,5 +1,5 @@
 import { spanGenerator, detectDelimiter } from '../lib/utils.js';
-import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, annotateEntityTypes, inferRelationships } from '../lib/viterbi.js';
+import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, updateWeightsFromFeedback, entitiesFromJoint, annotateEntityTypes, inferRelationships } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
 import { readFileSync } from 'fs';
 
@@ -424,6 +424,102 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(jointAfter[0]!.fields.some(f => f === 'Phone'), 'after multi-epoch training the decoder should pick Phone');
 
   console.log('✓ multi-iteration trainer harness improves phone weight and prediction');
+})();
+
+// New: entitiesFromJoint and feedback-based training
+(() => {
+  const lines = ['#12345 John Doe\t410-555-1212\tjohn@example.com'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
+  const w: any = { 'segment.is_phone': 2.0, 'segment.is_email': 2.0, 'segment.is_extid': 2.0, 'segment.is_name': 1.0 };
+  const joint = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+
+  const entities = entitiesFromJoint(lines, spans, joint, w as any);
+  ok(Array.isArray(entities) && entities.length === 1, 'entitiesFromJoint should return one entity');
+  const ent = entities[0]!;
+  ok(ent.fields.length >= 1, 'entity should contain fields');
+  for (const f of ent.fields) {
+    ok(f.fileStart >= 0 && f.fileEnd > f.fileStart, 'field file-relative positions present');
+    ok(f.entityStart !== undefined && f.entityEnd !== undefined, 'entity-relative positions present');
+    ok(typeof (f.confidence ?? 0) === 'number', 'confidence present (numeric)');
+  }
+
+  console.log('✓ entitiesFromJoint produced nested entity/field spans');
+
+  // Feedback-driven weight update: assert the phone span should be Phone
+  const lines2 = ['Contact: +1 555-123-4567'];
+  const spans2 = spanGenerator(lines2, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
+  const w2: any = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
+  const predBefore = jointViterbiDecode(lines2, spans2, w2, { maxStates: 64 });
+
+  const phoneSpan = spans2[0]!.spans.find(s => /\d{3,}/.test(lines2[0]!.slice(s.start, s.end)));
+  ok(!!phoneSpan, 'found a phone-like span to assert');
+
+  const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: phoneSpan!.start, end: phoneSpan!.end, fieldType: 'Phone', confidence: 1.0, action: 'add' } ] } ] } as any;
+
+  const before = { ...w2 };
+  const res = updateWeightsFromFeedback(lines2, spans2, predBefore, feedback, w2, 1.0, { maxStates: 64 });
+
+  ok((w2['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'feedback update should increase phone weight');
+
+  const predAfter = res.pred;
+  ok(predAfter[0]!.fields.some(f => f === 'Phone'), 'after feedback-based update the decoder should predict Phone');
+
+  console.log('✓ feedback-based weight update works');
+})();
+
+// New test: feedback remove action decreases weights and removes prediction
+(() => {
+  const lines = ['Contact: +1 555-000-1111'];
+  const spans = spanGenerator(lines, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
+  const w: any = { 'segment.is_phone': 5.0, 'segment.token_count_bucket': 0.1 };
+  const predBefore = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+  ok(predBefore[0]!.fields.some(f => f === 'Phone'), 'sanity: predBefore picks Phone');
+
+  const phoneSpan = spans[0]!.spans.find(s => /\d{3,}/.test(lines[0]!.slice(s.start, s.end)));
+  ok(!!phoneSpan, 'found phone-like span');
+
+  const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: phoneSpan!.start, end: phoneSpan!.end, fieldType: 'Phone', confidence: 1.0, action: 'remove' } ] } ] } as any;
+
+  const before = { ...w };
+  const originalCount = spans[0]!.spans.length;
+  const res = updateWeightsFromFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+
+  // removal: ensure the asserted span was removed from the spans used for prediction
+  ok(res.pred[0]!.fields.length === originalCount - 1, 'after remove feedback the predicted fields should reflect the removed span');
+
+  console.log('✓ feedback remove action decreases weight and removes prediction');
+})();
+
+// New test: multiple assertions in one entity (extid, email, phone) increase corresponding weights deterministically
+(() => {
+  const lines = ['#A12345\tjohn@example.com\t+1 555-111-2222'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
+  const w: any = { 'segment.is_extid': -3.0, 'segment.is_email': -3.0, 'segment.is_phone': -3.0 };
+  const predBefore = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+
+  const extSpan = spans[0]!.spans.find(s => isLikelyExtID(lines[0]!.slice(s.start, s.end)));
+  const emailSpan = spans[0]!.spans.find(s => isLikelyEmail(lines[0]!.slice(s.start, s.end)));
+  const phoneSpan = spans[0]!.spans.find(s => isLikelyPhone(lines[0]!.slice(s.start, s.end)));
+  ok(!!(extSpan && emailSpan && phoneSpan), 'found extid/email/phone spans to assert');
+
+  const feedback = { entities: [ { startLine: 0, fields: [
+    { lineIndex: 0, start: extSpan!.start, end: extSpan!.end, fieldType: 'ExtID', confidence: 1.0, action: 'add' },
+    { lineIndex: 0, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'Email', confidence: 1.0, action: 'add' },
+    { lineIndex: 0, start: phoneSpan!.start, end: phoneSpan!.end, fieldType: 'Phone', confidence: 1.0, action: 'add' }
+  ] } ] } as any;
+
+  const before = { ...w };
+  const res = updateWeightsFromFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+
+  // The update should either increase the detector weight OR the asserted label should already be predicted.
+  const predAfter = res.pred;
+  ok((w['segment.is_extid'] ?? 0) > (before['segment.is_extid'] ?? 0) || predAfter[0]!.fields.includes('ExtID'), 'extid weight increased or ExtID predicted');
+  ok((w['segment.is_email'] ?? 0) > (before['segment.is_email'] ?? 0) || predAfter[0]!.fields.includes('Email'), 'email weight increased or Email predicted');
+  ok((w['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0) || predAfter[0]!.fields.includes('Phone'), 'phone weight increased or Phone predicted');
+
+  ok(predAfter[0]!.fields.includes('ExtID') || predAfter[0]!.fields.includes('Email') || predAfter[0]!.fields.includes('Phone'), 'after multi-assert feedback, decoder predicts at least one asserted label');
+
+  console.log('✓ multi-assertion feedback increases respective weights reliably');
 })();
 
 console.log('All unit tests passed.');

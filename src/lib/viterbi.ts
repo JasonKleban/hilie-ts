@@ -1,4 +1,4 @@
-import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship } from './types.js';
+import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship, FieldSpan, EntitySpan } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
 function boundaryEmissionScore(
@@ -523,3 +523,332 @@ export function inferRelationships(joint: JointState[]): Relationship[] {
 
   return rels;
 }
+
+// --- New: convert joint states + spans into entity/field-level objects ---
+export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], joint: JointState[], featureWeights?: Record<string, number>): EntitySpan[] {
+  // compute line offsets
+  const offsets: number[] = [];
+  let off = 0;
+  for (let i = 0; i < lines.length; i++) {
+    offsets.push(off);
+    off += (lines[i]?.length ?? 0) + 1; // assume '\n' separator
+  }
+
+  // helper to score labels for a single span
+  function scoreLabelForSpan(lineIndex: number, spanIdx: number, label: FieldLabel): number {
+    const sctx: FeatureContext = { lineIndex, lines, candidateSpan: { lineIndex, start: spansPerLine[lineIndex]!.spans[spanIdx]!.start, end: spansPerLine[lineIndex]!.spans[spanIdx]!.end } };
+    let score = 0;
+    for (const f of segmentFeatures) {
+      const v = f.apply(sctx);
+      const w = (featureWeights && featureWeights[f.id]) ?? 0;
+      // label-aware scoring like in fieldEmissionScore
+      if (f.id === 'segment.is_phone') {
+        score += (label === 'Phone') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_email') {
+        score += (label === 'Email') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_extid') {
+        const txt = lines[lineIndex]?.slice(sctx.candidateSpan!.start, sctx.candidateSpan!.end) ?? '';
+        const exact = /^\d{10,11}$/.test(txt.replace(/\D/g, ''));
+        if (exact) {
+          score += (label === 'ExtID') ? -0.8 * w * v : (label === 'Phone' ? 0.7 * w * v : -0.3 * w * v);
+        } else {
+          score += (label === 'ExtID') ? w * v : -0.5 * w * v;
+        }
+      } else if (f.id === 'segment.is_name') {
+        score += (label === 'Name') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_preferred_name') {
+        score += (label === 'PreferredName') ? w * v : -0.5 * w * v;
+      } else if (f.id === 'segment.is_birthdate') {
+        score += (label === 'Birthdate') ? w * v : -0.5 * w * v;
+      } else {
+        score += w * v;
+      }
+    }
+    return score;
+  }
+
+  const entities: EntitySpan[] = [];
+
+  // find entity boundaries from joint states (lines with boundary === 'B')
+  for (let i = 0; i < joint.length; i++) {
+    if (joint[i]!.boundary !== 'B') continue;
+    // entity runs until next line with boundary === 'B' or end of document
+    let j = i + 1;
+    while (j < joint.length && joint[j]!.boundary !== 'B') j++;
+    const startLine = i;
+    const endLine = j - 1;
+
+    // accumulate fields
+    const fields: FieldSpan[] = [];
+
+    for (let li = startLine; li <= endLine; li++) {
+      const spans = spansPerLine[li]?.spans ?? [];
+      for (let si = 0; si < spans.length; si++) {
+        const s = spans[si]!;
+        const fileStart = offsets[li]! + s.start;
+        const fileEnd = offsets[li]! + s.end;
+        const text = lines[li]?.slice(s.start, s.end) ?? '';
+        // assigned label from joint state's fields if available
+        const assignedLabel = (joint[li] && joint[li]!.fields && joint[li]!.fields[si]) ? joint[li]!.fields[si] : undefined;
+
+        // approximate confidence via softmax over label scores if weights provided
+        let confidence = 1;
+        if (featureWeights) {
+          const labelScores: number[] = [];
+          const labels: FieldLabel[] = ['ExtID','Name','PreferredName','Phone','Email','GeneralNotes','MedicalNotes','DietaryNotes','Birthdate','NOISE'];
+          for (const lab of labels) labelScores.push(scoreLabelForSpan(li, si, lab as FieldLabel));
+          // softmax
+          const max = Math.max(...labelScores);
+          const exps = labelScores.map(sv => Math.exp(sv - max));
+          const ssum = exps.reduce((a,b) => a+b, 0);
+          const probs = exps.map(e => e / ssum);
+          // map assignedLabel to index
+          const idx = labels.indexOf(assignedLabel ?? 'NOISE');
+          confidence = probs[idx] ?? 0;
+        }
+
+        fields.push({ lineIndex: li, start: s.start, end: s.end, text, fileStart, fileEnd, fieldType: assignedLabel, confidence });
+      }
+    }
+
+    // entity file range
+    const fileStart = offsets[startLine] ?? 0;
+    const fileEnd = (offsets[endLine] ?? 0) + ((lines[endLine]?.length) ?? 0);
+
+    // set entity-relative positions for fields
+    for (const f of fields) {
+      f.entityStart = f.fileStart - fileStart;
+      f.entityEnd = f.fileEnd - fileStart;
+    }
+
+    entities.push({ startLine, endLine, fileStart, fileEnd, entityType: joint[startLine]!.entityType, fields });
+  }
+
+  return entities;
+}
+
+// --- New: accept feedback (asserted+removed spans) and fit weights via a scaled perceptron-like update ---
+export function updateWeightsFromFeedback(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  joint: JointState[],
+  feedback: import('./types.js').Feedback,
+  weights: Record<string, number>,
+  lr = 1.0,
+  enumerateOpts?: EnumerateOptions
+): { updated: Record<string, number>; pred: JointState[] } {
+  // Clone spans so we can modify
+  const spansCopy: LineSpans[] = spansPerLine.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }));
+
+  // apply feedback: additions/removals
+  let confs: number[] = [];
+
+  // helper to find matching span index by line/start/end
+  function findSpanIndex(lineIdx: number, start?: number, end?: number) {
+    const s = spansCopy[lineIdx];
+    if (!s) return -1;
+    if (start === undefined || end === undefined) return -1;
+    return s.spans.findIndex(x => x.start === start && x.end === end);
+  }
+
+  for (const ent of feedback.entities ?? []) {
+    const entStartLine = ent.startLine ?? null;
+    const entEndLine = ent.endLine ?? null;
+
+    for (const f of ent.fields ?? []) {
+      const li = f.lineIndex ?? entStartLine;
+      if (li === null || li === undefined) continue;
+      const action = f.action ?? 'add';
+      if (action === 'remove') {
+        const idx = findSpanIndex(li, f.start, f.end);
+        if (idx >= 0) spansCopy[li]!.spans.splice(idx, 1);
+        if (f.confidence !== undefined) confs.push(f.confidence);
+      } else {
+        // add or assert: ensure span exists
+        const idx = findSpanIndex(li, f.start, f.end);
+        if (idx < 0) {
+          // insert and keep sorted
+          spansCopy[li] = spansCopy[li] ?? { lineIndex: li, spans: [] };
+          spansCopy[li]!.spans.push({ start: f.start ?? 0, end: f.end ?? 0 });
+          spansCopy[li]!.spans.sort((a, b) => a.start - b.start);
+        }
+        if (f.confidence !== undefined) confs.push(f.confidence);
+      }
+    }
+  }
+
+  const meanConf = confs.length ? confs.reduce((a,b)=>a+b,0)/confs.length : 1.0;
+
+  // Build gold JointState[] aligned with spansCopy
+  const gold: JointState[] = [];
+
+  // create a quick mapping from feedback assertions to labels per-line/start/end
+  const labelMap: Record<string, FieldLabel> = {}; // key = `${line}:${start}-${end}`
+  for (const ent of feedback.entities ?? []) {
+    for (const f of ent.fields ?? []) {
+      if (f.action === 'remove') continue;
+      if (f.fieldType) {
+        const li = f.lineIndex ?? ent.startLine;
+        if (li === undefined) continue;
+        const key = `${li}:${f.start}-${f.end}`;
+        labelMap[key] = f.fieldType;
+      }
+    }
+  }
+
+  // Determine boundary choices: prefer feedback entity starts when provided, otherwise fall back to joint
+  const boundarySet = new Set<number>();
+  for (const ent of feedback.entities ?? []) {
+    if (ent.startLine !== undefined) boundarySet.add(ent.startLine);
+  }
+
+  for (let li = 0; li < spansCopy.length; li++) {
+    const lineSp = spansCopy[li] ?? { lineIndex: li, spans: [] };
+    const fields: FieldLabel[] = [];
+    for (const sp of lineSp.spans) {
+      const key = `${li}:${sp.start}-${sp.end}`;
+      if (labelMap[key]) fields.push(labelMap[key]!);
+      else {
+        // fallback to predicted label if present at same index, otherwise NOISE
+        const predLabel = (joint[li] && joint[li]!.fields && joint[li]!.fields[0]) ? (function findMatching(){
+          // try to find span with same coords in original joint spans
+          const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x=>x.start===sp.start && x.end===sp.end);
+          if (origIdx >= 0) return joint[li]!.fields[origIdx] ?? 'NOISE';
+          // else fallback to NOISE
+          return 'NOISE' as FieldLabel;
+        })() : 'NOISE' as FieldLabel;
+        fields.push(predLabel);
+      }
+    }
+    const boundary: BoundaryState = boundarySet.has(li) ? 'B' : (joint[li] ? joint[li]!.boundary : 'C');
+    gold.push({ boundary, fields });
+  }
+
+  // Re-run prediction on the augmented spans
+  const pred = jointViterbiDecode(lines, spansCopy, weights, enumerateOpts);
+
+  // extract feature vectors
+  const vGold = extractFeatureVector(lines, spansCopy, gold);
+  const vPred = extractFeatureVector(lines, spansCopy, pred);
+
+  // apply scaled update: w += lr * meanConf * (vGold - vPred)
+  const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
+  for (const k of keys) {
+    const delta = (vGold[k] ?? 0) - (vPred[k] ?? 0);
+    weights[k] = (weights[k] ?? 0) + lr * meanConf * delta;
+  }
+
+  // Debug logs removed
+
+  // Heuristic safety net: if user explicitly asserted a Phone/Email/ExtID but
+  // the corresponding weighted delta ended up non-positive, attempt a targeted
+  // nudge that is large enough to flip the score for the asserted span.
+  const assertedFields = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+
+  async function tryNudge(featureId: string, targetLabel: FieldLabel) {
+    // find first asserted span with this label
+    const f = assertedFields.find(x => x.fieldType === targetLabel);
+    if (!f) return;
+    const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+    const si = (spansCopy[li]?.spans ?? []).findIndex(x => x.start === f.start && x.end === f.end);
+    if (si < 0) return;
+
+    // If already predicted as target, nothing to do
+    const currLabel = pred[li] && pred[li]!.fields && pred[li]!.fields[si] ? pred[li]!.fields[si] : 'NOISE';
+    if (currLabel === targetLabel) return;
+
+    // Compute score for target and current label under current weights
+    function scoreWithWeights(wts: Record<string, number>, lab: FieldLabel) {
+      const sctx: FeatureContext = { lineIndex: li, lines, candidateSpan: { lineIndex: li, start: spansCopy[li]!.spans[si]!.start, end: spansCopy[li]!.spans[si]!.end } };
+      let score = 0;
+      for (const ftr of segmentFeatures) {
+        const v = ftr.apply(sctx);
+        const w = wts[ftr.id] ?? 0;
+        if (ftr.id === 'segment.is_phone') {
+          score += (lab === 'Phone') ? w * v : -0.5 * w * v;
+        } else if (ftr.id === 'segment.is_email') {
+          score += (lab === 'Email') ? w * v : -0.5 * w * v;
+        } else if (ftr.id === 'segment.is_extid') {
+          const txt = lines[li]?.slice(sctx.candidateSpan!.start, sctx.candidateSpan!.end) ?? '';
+          const exact = /^\d{10,11}$/.test(txt.replace(/\D/g, ''));
+          if (exact) {
+            score += (lab === 'ExtID') ? -0.8 * w * v : (lab === 'Phone' ? 0.7 * w * v : -0.3 * w * v);
+          } else {
+            score += (lab === 'ExtID') ? w * v : -0.5 * w * v;
+          }
+        } else if (ftr.id === 'segment.is_name') {
+          score += (lab === 'Name') ? w * v : -0.5 * w * v;
+        } else if (ftr.id === 'segment.is_preferred_name') {
+          score += (lab === 'PreferredName') ? w * v : -0.5 * w * v;
+        } else if (ftr.id === 'segment.is_birthdate') {
+          score += (lab === 'Birthdate') ? w * v : -0.5 * w * v;
+        } else {
+          score += w * v;
+        }
+      }
+      return score;
+    }
+
+    // compute current scores
+    const scoreTarget = scoreWithWeights(weights, targetLabel);
+    const scoreCurr = scoreWithWeights(weights, currLabel as FieldLabel);
+
+    // debug info
+    // console.log(`nudge check for ${featureId} @ line ${li} span ${si}: scoreTarget=${scoreTarget}, scoreCurr=${scoreCurr}, currLabel=${currLabel}`);
+
+    if (scoreTarget > scoreCurr) return; // already favored
+
+    // numerical slope estimation: increase feature by 1 and see score change
+    const base = weights[featureId] ?? 0;
+    weights[featureId] = base + 1;
+    const scoreTargetPlus = scoreWithWeights(weights, targetLabel);
+    const scoreCurrPlus = scoreWithWeights(weights, currLabel as FieldLabel);
+    // revert
+    weights[featureId] = base;
+
+    const slope = (scoreTargetPlus - scoreTarget) - (scoreCurrPlus - scoreCurr);
+
+    if (slope > 1e-9) {
+      const needed = (scoreCurr - scoreTarget + 1e-6) / slope;
+      const nud = Math.max(needed, 0.5) * lr * meanConf; // at least small nudge
+      weights[featureId] = (weights[featureId] ?? 0) + nud;
+    } else {
+      // try to find an alternative feature that actually moves the target vs current gap
+      let bestFeat: string | null = null;
+      let bestSlope = 0;
+      for (const ftr of segmentFeatures) {
+        const baseF = weights[ftr.id] ?? 0;
+        weights[ftr.id] = baseF + 1;
+        const sTargetPlus = scoreWithWeights(weights, targetLabel);
+        const sCurrPlus = scoreWithWeights(weights, currLabel as FieldLabel);
+        weights[ftr.id] = baseF;
+        const s = (sTargetPlus - scoreTarget) - (sCurrPlus - scoreCurr);
+        if (s > bestSlope) { bestSlope = s; bestFeat = ftr.id; }
+      }
+
+      if (bestFeat && bestSlope > 1e-9) {
+        const needed = (scoreCurr - scoreTarget + 1e-6) / bestSlope;
+        const nud = Math.max(needed, 0.5) * lr * meanConf;
+        weights[bestFeat] = (weights[bestFeat] ?? 0) + nud;
+        // console.log(`nudged alternative feature ${bestFeat} by ${nud} to favor ${targetLabel}`);
+      } else {
+        // fallback large nudge on original feature
+        weights[featureId] = (weights[featureId] ?? 0) + lr * meanConf * 8.0;
+      }
+    }
+
+    // re-run prediction on spansCopy to update pred
+    const newPred = jointViterbiDecode(lines, spansCopy, weights, enumerateOpts);
+    for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
+  }
+
+  // Try targeted nudges for asserted detectors
+  tryNudge('segment.is_phone', 'Phone');
+  tryNudge('segment.is_email', 'Email');
+  tryNudge('segment.is_extid', 'ExtID');
+
+
+  return { updated: weights, pred };
+}
+
+
