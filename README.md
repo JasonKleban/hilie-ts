@@ -1,5 +1,7 @@
 # hilie-ts — Human-in-the-loop Information Extractor (TypeScript)
 
+(This is almost entirely AI-generated and I don't know if it really works.)
+
 A compact library demonstrating Viterbi-based boundary and joint decoding for simple information extraction workflows.
 
 ## Concepts
@@ -53,4 +55,3 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 - [ ] Add TypeScript type tests and integrate with a test runner (Jest/Mocha)
 - [ ] Provide examples and a tutorial notebook demonstrating a human-in-the-loop labeling workflow
 
-Contributions welcome! If you want a hand adding any of the TODO items above just let me know.
