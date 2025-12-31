@@ -32,7 +32,7 @@ async function runDataDrivenTests() {
     console.info(`=== TEST CASE ${file} ===`);
 
     const filePath = path.join(chosenDir!, file);
-    const content = await (fs as any).readFile(filePath, 'utf8');
+    const content : string = await (fs as any).readFile(filePath, 'utf8');
     const lines = content.split(/\r?\n/).filter(Boolean);
 
     // segment/joint feature weights
@@ -52,10 +52,8 @@ async function runDataDrivenTests() {
 
     const joint = jointViterbiDecode(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
 
-    joint.forEach((state, i) => {
-      console.log(`Line ${i}: ${lines[i]}`);
-      console.log(`  Boundary: ${state.boundary}`);
-      console.log(`  Fields:   ${state.fields.join(", ")}`);
+    joint.slice(0, 10).forEach((state, i) => {
+      console.log(JSON.stringify(state, null, 2));
     });
   }
 }

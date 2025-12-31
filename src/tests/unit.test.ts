@@ -1,5 +1,5 @@
 import { spanGenerator, detectDelimiter } from '../lib/utils.js';
-import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, updateWeightsFromFeedback, entitiesFromJoint, annotateEntityTypes, inferRelationships } from '../lib/viterbi.js';
+import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, updateWeightsFromFeedback, entitiesFromJoint } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
 import { readFileSync } from 'fs';
 

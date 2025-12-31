@@ -1,88 +1,22 @@
 import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship, FieldSpan, Feedback, RecordSpan, SubEntitySpan, SubEntityType } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
-function boundaryEmissionScore(
-  state: BoundaryState,
-  ctx: FeatureContext,
-  weights: Record<string, number>
-): number {
-  let score = 0;
-
-  for (const f of boundaryFeatures) {
-    const v = f.apply(ctx);
-    const w = weights[f.id] ?? 0;
-    score += state === 'B' ? w * v : -w * v;
-  }
-
-  return score;
+interface VCell {
+  score: number;
+  prev: number | null;
 }
 
-function fieldEmissionScore(
-  fields: FieldLabel[],
-  spans: LineSpans,
-  ctxBase: FeatureContext,
-  weights: Record<string, number>
-): number {
-  let score = 0;
-
-  for (let i = 0; i < spans.spans.length; i++) {
-    const label = fields[i];
-    if (label === 'NOISE') continue;
-
-    const span = spans.spans[i]!;
-    const ctx: FeatureContext = {
-      ...ctxBase,
-      candidateSpan: {
-        lineIndex: spans.lineIndex,
-        start: span.start,
-        end: span.end
-      }
-    };
-
-    for (const f of segmentFeatures) {
-      const w = weights[f.id] ?? 0;
-      const v = f.apply(ctx);
-
-      // extract span text for heuristics like numeric-length checks
-      const spanText = ctx.candidateSpan ? ctx.lines[ctx.candidateSpan.lineIndex]?.slice(ctx.candidateSpan.start, ctx.candidateSpan.end) ?? '' : '';
-      const exact10or11Digits = /^\d{10,11}$/.test(spanText.replace(/[^0-9]/g, ''));
-
-      // Label-aware biases for specific segment detectors
-      if (f.id === 'segment.is_phone') {
-        score += (label === 'Phone') ? w * v : -0.5 * w * v;
-      } else if (f.id === 'segment.is_email') {
-        score += (label === 'Email') ? w * v : -0.5 * w * v;
-      } else if (f.id === 'segment.is_extid') {
-        // prefer ExtID label when extid-like; but penalize assigning ExtID to exact 10/11 digit values (likely phones)
-        if (exact10or11Digits) {
-          score += (label === 'ExtID') ? -0.8 * w * v : (label === 'Phone' ? 0.7 * w * v : -0.3 * w * v);
-        } else {
-          score += (label === 'ExtID') ? w * v : -0.5 * w * v;
-        }
-      } else if (f.id === 'segment.is_name') {
-        score += (label === 'Name') ? w * v : -0.5 * w * v;
-      } else if (f.id === 'segment.is_preferred_name') {
-        score += (label === 'PreferredName') ? w * v : -0.5 * w * v;
-      } else if (f.id === 'segment.is_birthdate') {
-        score += (label === 'Birthdate') ? w * v : -0.5 * w * v;
-      } else {
-        score += w * v;
-      }
-    }
-  }
-
-  return score;
-}
-
-function jointEmissionScore(
-  state: JointState,
-  spans: LineSpans,
-  ctx: FeatureContext,
-  weights: Record<string, number>
-): number {
-  return boundaryEmissionScore(state.boundary, ctx, weights) + fieldEmissionScore(state.fields, spans, ctx, weights);
-}
-
+/**
+ * Compute a transition score between two joint states used by the Viterbi DP.
+ *
+ * Purpose: provide small hand-crafted biases for transitions between
+ * boundary states (B/C). This helps the decoder prefer or penalize
+ * starting a new record vs. continuing an existing one.
+ *
+ * Notes:
+ * - Pulls optional override values from `weights['transition.*']` if present.
+ * - Pure function: no side effects, returns a numeric score to add to a path.
+ */
 function transitionScore(prev: JointState, curr: JointState, weights: Record<string, number>): number {
   let score = 0;
 
@@ -101,11 +35,18 @@ function transitionScore(prev: JointState, curr: JointState, weights: Record<str
   return score;
 }
 
-interface VCell {
-  score: number;
-  prev: number | null;
-}
-
+/**
+ * Enumerate plausible per-line JointState assignments for a set of candidate spans.
+ *
+ * Responsibility: generate a bounded, practical search space of label assignments
+ * for a single line's spans (used by `jointViterbiDecode` when building the state
+ * lattice). To avoid exponential blowup the function enforces caps such as
+ * `maxUniqueFields`, `maxPhones`, and `maxStates` and optionally restricts
+ * enumeration to an initial safe prefix of spans.
+ *
+ * Returns: an array of `JointState` objects (each with a `boundary` and a
+ * `fields` array) representing candidate per-line assignments.
+ */
 export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): JointState[] {
   const states: JointState[] = [];
 
@@ -133,6 +74,13 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
     return new Set(acc.filter(x => x !== 'NOISE')).size;
   }
 
+  /**
+   * Recursive helper that enumerates combinations of field labels for spans.
+   *
+   * Purpose: perform depth-first generation of candidate `fields` arrays while
+   *   enforcing caps (unique counts, per-label limits, overall maxStates) to
+   *   keep the state space tractable.
+   */
   function backtrack(i: number, acc: string[]) {
     // Global safety check: stop if we've reached the cap
     if (states.length >= options.maxStates) return;
@@ -179,6 +127,20 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
   return states;
 }
 
+/**
+ * Perform joint Viterbi decoding across document lines.
+ *
+ * Intent: simultaneously infer per-line boundary codes (`B` / `C`) and the
+ * per-span field label assignments by building a dynamic programming lattice
+ * over enumerated per-line state spaces (produced by `enumerateStates`).
+ *
+ * Behavior:
+ * - Precomputes boundary and segment feature contributions and emission scores
+ *   to keep the inner loop efficient.
+ * - Uses `transitionScore` to bias transitions between `JointState`s.
+ *
+ * Returns: the best-scoring `JointState[]` (one entry per input line).
+ */
 export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: EnumerateOptions): JointState[] {
   const lattice: VCell[][] = [];
   const stateSpaces: JointState[][] = [];
@@ -324,7 +286,16 @@ export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], f
   return path;
 }
 
-// --- Feature vector extraction and lightweight trainer (structured perceptron-like) ---
+/**
+ * Extract a feature vector from a joint assignment (gold or predicted).
+ *
+ * Purpose: compute an additive feature vector (mapping id -> numeric count)
+ * by summing boundary-level and span-level feature contributions according to
+ * the labels present in `joint` so that learning updates can compare
+ * gold vs. predicted vectors.
+ *
+ * Returns: a sparse map from feature id to numeric contribution.
+ */
 export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[], joint: JointState[]): Record<string, number> {
   const vec: Record<string, number> = {};
 
@@ -382,6 +353,15 @@ export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[],
   return vec;
 }
 
+/**
+ * Update model weights from a fully-specified gold example (perceptron-style).
+ *
+ * Responsibility: Given `gold` joint labels, run the decoder under current
+ * `weights` to get `pred`, compute feature vectors for `gold` and `pred`, and
+ * apply a simple additive update `w += lr * (vGold - vPred)`. The update
+ * mutates the provided `weights` object and returns it along with the
+ * prediction used for the update.
+ */
 export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpans[], gold: JointState[], weights: Record<string, number>, lr = 1.0, enumerateOpts?: EnumerateOptions): { updated: Record<string, number>; pred: JointState[] } {
   // Predict with current weights
   const pred = jointViterbiDecode(lines, spansPerLine, weights, enumerateOpts);
@@ -400,7 +380,15 @@ export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpan
   return { updated: weights, pred };
 }
 
-// --- Entity type annotation + relationship inference ---
+/**
+ * Heuristically assign `entityType` hints (Primary / Guardian / Unknown) to
+ * lines marked as record boundaries.
+ *
+ * Intent: use lightweight boundary features and role-keyword signals to label
+ * boundary lines with likely entity roles, then enforce simple contiguity
+ * constraints (e.g., Guardians should have a nearby Primary). Returns a new
+ * `JointState[]` array with `entityType` set for boundary entries.
+ */
 export function annotateEntityTypes(lines: string[], joint: JointState[]): JointState[] {
   // Compute per-line feature scores using boundaryFeatures
   const featuresPerLine: Record<number, Record<string, number>> = {};
@@ -505,26 +493,23 @@ export function annotateEntityTypes(lines: string[], joint: JointState[]): Joint
   return assigned;
 }
 
-export function inferRelationships(joint: JointState[]): Relationship[] {
-  const rels: Relationship[] = [];
-
-  const primaries = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Primary');
-  const guardians = joint.map((s, i) => ({ s, i })).filter(x => x.s.entityType === 'Guardian');
-
-  for (const g of guardians) {
-    let closest: { s: JointState; i: number } | null = null;
-    for (const p of primaries) {
-      if (p.i <= g.i && (closest === null || g.i - p.i < g.i - closest.i)) closest = p;
-    }
-    if (closest && g.i - closest.i <= 6) {
-      rels.push({ primaryIndex: closest.i, guardianIndex: g.i });
-    }
-  }
-
-  return rels;
-}
-
-// --- New: convert joint states + spans into entity/field-level objects ---
+/**
+ * Convert a joint decode into a structured collection of records and sub-entities.
+ *
+ * Purpose: take a predicted or gold `joint` (per-line boundary+fields assignments)
+ * and produce an array of `RecordSpan` objects where each top-level record contains
+ * grouped `SubEntitySpan` children (Primary/Guardian) with `FieldSpan` entries.
+ * The function computes file-relative offsets, per-field confidences (when
+ * `featureWeights` are provided), and skips `Unknown` sub-entities.
+ *
+ * Parameters:
+ * - lines: array of document lines
+ * - spansPerLine: candidate spans for each line
+ * - joint: per-line `JointState[]` assignments (may or may not include entityType)
+ * - featureWeights: optional weights used to compute softmax confidences per field
+ *
+ * Returns: a `RecordSpan[]` describing the inferred records and their sub-entities.
+ */
 export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], joint: JointState[], featureWeights?: Record<string, number>): RecordSpan[] {
   // compute line offsets
   const offsets: number[] = [];
@@ -534,6 +519,13 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
     off += (lines[i]?.length ?? 0) + 1; // assume '\n' separator
   }
 
+  /**
+   * Compute a label-specific score for a single candidate span (used when
+   * converting a joint into `RecordSpan[]` or to compute confidence via softmax).
+   *
+   * Notes: mirrors the emission-style label-aware weighting logic used by the
+   * decoder so confidence estimates align with model scoring.
+   */
   // helper to score labels for a single span
   function scoreLabelForSpan(lineIndex: number, spanIdx: number, label: FieldLabel): number {
     const sctx: FeatureContext = { lineIndex, lines, candidateSpan: { lineIndex, start: spansPerLine[lineIndex]!.spans[spanIdx]!.start, end: spansPerLine[lineIndex]!.spans[spanIdx]!.end } };
@@ -651,7 +643,26 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
   return records;
 }
 
-// --- New: accept feedback (asserted+removed spans) and fit weights via a scaled perceptron-like update ---
+/**
+ * Update model weights using user feedback (fields added or removed).
+ *
+ * Purpose: incorporate feedback by constructing gold joints from asserted
+ * additions/removals, computing feature vector deltas between gold and
+ * predicted joints, and applying perceptron-style updates. Supports
+ * deterministic negative updates for removals, and targeted feature nudges
+ * when straightforward updates do not flip predictions.
+ *
+ * Parameters:
+ * - lines: the document lines
+ * - spansPerLine: candidate spans per line (may be modified internally)
+ * - joint: current predicted joint assignment
+ * - feedback: user-supplied feedback with entity/field add/remove assertions
+ * - weights: mutable feature weight map to be updated in-place
+ * - lr: learning rate (default 1.0)
+ * - enumerateOpts: optional enumeration constraints passed to the decoder
+ *
+ * Returns: object containing the updated weights and the post-update prediction.
+ */
 export function updateWeightsFromFeedback(
   lines: string[],
   spansPerLine: LineSpans[],
@@ -762,8 +773,6 @@ export function updateWeightsFromFeedback(
     weights[k] = (weights[k] ?? 0) + lr * meanConf * delta;
   }
 
-  // Debug logs removed
-
   // Heuristic safety net: if user explicitly asserted a Phone/Email/ExtID but
   // the corresponding weighted delta ended up non-positive, attempt a targeted
   // nudge that is large enough to flip the score for the asserted span.
@@ -860,6 +869,15 @@ export function updateWeightsFromFeedback(
     }
   }
 
+  /**
+   * Targeted feature nudging helper.
+   *
+   * Purpose: when straightforward updates do not flip a predicted label to an
+   * asserted target, `tryNudge` attempts to identify a feature (or the
+   * provided featureId) where increasing its weight will most effectively
+   * change the score gap between current label and target label and then
+   * applies a calibrated nudge to that feature.
+   */
   async function tryNudge(featureId: string, targetLabel: FieldLabel) {
     // find first asserted span with this label
     const f = assertedFields.find(x => x.fieldType === targetLabel);
