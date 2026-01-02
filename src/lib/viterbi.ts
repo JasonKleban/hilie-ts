@@ -362,33 +362,6 @@ export function extractJointFeatureVector(lines: string[], spansPerLine: LineSpa
 }
 
 /**
- * Update model weights from a fully-specified gold example (perceptron-style).
- *
- * Responsibility: Given `gold` joint labels, run the decoder under current
- * `weights` to get `pred`, compute feature vectors for `gold` and `pred`, and
- * apply a simple additive update `w += lr * (vGold - vPred)`. The update
- * mutates the provided `weights` object and returns it along with the
- * prediction used for the update.
- */
-export function updateWeightsFromGoldSequence(lines: string[], spansPerLine: LineSpans[], goldSeq: JointSequence, weights: Record<string, number>, lr = 1.0, enumerateOpts?: EnumerateOptions): { updated: Record<string, number>; pred: JointSequence } {
-  // Predict with current weights
-  const pred = decodeJointSequence(lines, spansPerLine, weights, enumerateOpts);
-
-  // Extract feature vectors for gold and pred
-  const vGold = extractJointFeatureVector(lines, spansPerLine, goldSeq);
-  const vPred = extractJointFeatureVector(lines, spansPerLine, pred);
-
-  // Apply perceptron-like update: w += lr * (vGold - vPred)
-  const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
-  for (const k of keys) {
-    const delta = (vGold[k] ?? 0) - (vPred[k] ?? 0);
-    weights[k] = (weights[k] ?? 0) + lr * delta;
-  }
-
-  return { updated: weights, pred };
-}
-
-/**
  * Heuristically assign `entityType` hints (Primary / Guardian / Unknown) to
  * lines marked as record boundaries.
  *
@@ -662,11 +635,17 @@ export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpa
 /**
  * Update model weights using user feedback (fields added or removed).
  *
- * Purpose: incorporate feedback by constructing gold joints from asserted
- * additions/removals, computing feature vector deltas between gold and
- * predicted joints, and applying perceptron-style updates. Supports
- * deterministic negative updates for removals, and targeted feature nudges
- * when straightforward updates do not flip predictions.
+ * Purpose: incorporate sparse user corrections by updating weights based on
+ * explicitly added/removed spans. Spans not mentioned in feedback are treated
+ * as implicitly correct and receive stabilization boosts when predictions remain
+ * consistent, preventing weight drift and promoting convergence.
+ *
+ * Behavior:
+ * - Processes only explicitly corrected spans (add/remove actions)
+ * - Applies perceptron-style updates for corrections
+ * - Provides stabilization: spans that match original prediction and weren't
+ *   corrected receive small positive reinforcement (controlled by stabilizationFactor)
+ * - Supports targeted nudges when straightforward updates don't flip predictions
  *
  * Parameters:
  * - lines: the document lines
@@ -674,8 +653,9 @@ export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpa
  * - jointSeq: current predicted joint assignment
  * - feedback: user-supplied feedback with entity/field add/remove assertions
  * - weights: mutable feature weight map to be updated in-place
- * - lr: learning rate (default 1.0)
+ * - learningRate: default 1.0
  * - enumerateOpts: optional enumeration constraints passed to the decoder
+ * - stabilizationFactor: boost factor for uncorrected spans (default 0.15)
  *
  * Returns: object containing the updated weights and the post-update prediction.
  */
@@ -685,11 +665,15 @@ export function updateWeightsFromUserFeedback(
   jointSeq: JointSequence,
   feedback: Feedback,
   weights: Record<string, number>,
-  lr = 1.0,
-  enumerateOpts?: EnumerateOptions
+  learningRate = 1.0,
+  enumerateOpts?: EnumerateOptions,
+  stabilizationFactor = 0.15
 ): { updated: Record<string, number>; pred: JointSequence } {
   // Clone spans so we can modify
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }));
+
+  // Track which spans were explicitly mentioned in feedback for stabilization pass
+  const feedbackTouchedSpans = new Set<string>();
 
   // apply feedback: additions/removals
   let confs: number[] = [];
@@ -708,6 +692,11 @@ export function updateWeightsFromUserFeedback(
     for (const f of ent.fields ?? []) {
       const li = f.lineIndex ?? entStartLine;
       if (li === null || li === undefined) continue;
+      
+      // Mark this span as touched by feedback
+      const spanKey = `${li}:${f.start}-${f.end}`;
+      feedbackTouchedSpans.add(spanKey);
+      
       const action = f.action ?? 'add';
       if (action === 'remove') {
         const idx = findSpanIndex(li, f.start, f.end);
@@ -785,7 +774,7 @@ export function updateWeightsFromUserFeedback(
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
   for (const k of keys) {
     const delta = (vGold[k] ?? 0) - (vPred[k] ?? 0);
-    weights[k] = (weights[k] ?? 0) + lr * meanConf * delta;
+    weights[k] = (weights[k] ?? 0) + learningRate * meanConf * delta;
   }
 
   // Heuristic safety net: if user explicitly asserted a Phone/Email/ExtID but
@@ -876,7 +865,7 @@ export function updateWeightsFromUserFeedback(
         const delta = (vGoldSpan[k] ?? 0) - (vPredSpan[k] ?? 0);
         // Use the field's confidence as the scaling factor for the removal
         // update so users can provide weaker/stronger signals.
-        weights[k] = (weights[k] ?? 0) + lr * (f.confidence ?? 1.0) * delta;
+        weights[k] = (weights[k] ?? 0) + learningRate * (f.confidence ?? 1.0) * delta;
       }
     }
   }
@@ -955,7 +944,7 @@ export function updateWeightsFromUserFeedback(
 
     if (slope > 1e-9) {
       const needed = (scoreCurr - scoreTarget + 1e-6) / slope;
-      const nud = Math.max(needed, 0.5) * lr * meanConf; // at least small nudge
+      const nud = Math.max(needed, 0.5) * learningRate * meanConf; // at least small nudge
       weights[featureId] = (weights[featureId] ?? 0) + nud;
     } else {
       // try to find an alternative feature that actually moves the target vs current gap
@@ -973,12 +962,12 @@ export function updateWeightsFromUserFeedback(
 
       if (bestFeat && bestSlope > 1e-9) {
         const needed = (scoreCurr - scoreTarget + 1e-6) / bestSlope;
-        const nud = Math.max(needed, 0.5) * lr * meanConf;
+        const nud = Math.max(needed, 0.5) * learningRate * meanConf;
         weights[bestFeat] = (weights[bestFeat] ?? 0) + nud;
         // console.log(`nudged alternative feature ${bestFeat} by ${nud} to favor ${targetLabel}`);
       } else {
         // fallback large nudge on original feature
-        weights[featureId] = (weights[featureId] ?? 0) + lr * meanConf * 8.0;
+        weights[featureId] = (weights[featureId] ?? 0) + learningRate * meanConf * 8.0;
       }
     }
 
@@ -992,6 +981,90 @@ export function updateWeightsFromUserFeedback(
   tryNudge('segment.is_email', 'Email');
   tryNudge('segment.is_extid', 'ExtID');
 
+  // Stabilization pass: reinforce uncorrected spans that remain consistent
+  // Purpose: prevent weight drift by giving small positive boosts to features
+  // associated with spans that (1) weren't corrected by the user (implicitly
+  // approved), and (2) are predicted consistently before and after the update.
+  if (stabilizationFactor > 0) {
+    let stabilizationCount = 0;
+    
+    for (let li = 0; li < spansPerLine.length; li++) {
+      const origSpans = spansPerLine[li]?.spans ?? [];
+      const origState = jointSeq[li];
+      const newState = pred[li];
+      
+      if (!origState || !newState) continue;
+      
+      for (let si = 0; si < origSpans.length; si++) {
+        const span = origSpans[si];
+        if (!span) continue;
+        
+        const spanKey = `${li}:${span.start}-${span.end}`;
+        
+        // Skip if this span was mentioned in feedback
+        if (feedbackTouchedSpans.has(spanKey)) continue;
+        
+        // Get original and new predictions for this span
+        const origLabel = origState.fields?.[si];
+        
+        // Find matching span in new prediction (by coordinates)
+        const newSpanIdx = pred[li]?.fields?.findIndex((_, idx) => {
+          const newSpan = spansPerLine[li]?.spans[idx];
+          return newSpan && newSpan.start === span.start && newSpan.end === span.end;
+        }) ?? -1;
+        
+        const newLabel = newSpanIdx >= 0 ? newState.fields?.[newSpanIdx] : undefined;
+        
+        // Only stabilize if labels match and it's not NOISE
+        if (!origLabel || !newLabel || origLabel !== newLabel || origLabel === 'NOISE') continue;
+        
+        // Extract feature contributions for this stable span
+        const sctx: FeatureContext = { 
+          lineIndex: li, 
+          lines, 
+          candidateSpan: { lineIndex: li, start: span.start, end: span.end } 
+        };
+        
+        for (const f of segmentFeatures) {
+          const v = f.apply(sctx);
+          if (v === 0) continue; // Skip features that don't fire
+          
+          const txt = lines[li]?.slice(span.start, span.end) ?? '';
+          const exact10or11 = /^\d{10,11}$/.test(txt.replace(/\D/g, ''));
+          
+          // Apply label-aware contribution (same logic as extraction)
+          let contrib = v;
+          if (f.id === 'segment.is_phone') {
+            contrib = origLabel === 'Phone' ? v : -0.5 * v;
+          } else if (f.id === 'segment.is_email') {
+            contrib = origLabel === 'Email' ? v : -0.5 * v;
+          } else if (f.id === 'segment.is_extid') {
+            if (exact10or11) {
+              contrib = (origLabel === 'ExtID') ? -0.8 * v : (origLabel === 'Phone' ? 0.7 * v : -0.3 * v);
+            } else {
+              contrib = origLabel === 'ExtID' ? v : -0.5 * v;
+            }
+          } else if (f.id === 'segment.is_name') {
+            contrib = origLabel === 'Name' ? v : -0.5 * v;
+          } else if (f.id === 'segment.is_preferred_name') {
+            contrib = origLabel === 'PreferredName' ? v : -0.5 * v;
+          } else if (f.id === 'segment.is_birthdate') {
+            contrib = origLabel === 'Birthdate' ? v : -0.5 * v;
+          }
+          
+          // Apply small positive boost scaled by learning rate and stabilization factor
+          weights[f.id] = (weights[f.id] ?? 0) + learningRate * stabilizationFactor * contrib;
+        }
+        
+        stabilizationCount++;
+      }
+    }
+    
+    // Optionally log stabilization activity (commented out by default)
+    // if (stabilizationCount > 0) {
+    //   console.log(`Stabilized ${stabilizationCount} uncorrected spans with factor ${stabilizationFactor}`);
+    // }
+  }
 
   return { updated: weights, pred };
 }
