@@ -1,5 +1,5 @@
 // Curated public API
-export type { Feature, FeatureContext, JointState, JointSequence, LineSpans, FieldSpan, Feedback, TransitionWeights, BoundaryState } from './lib/types.js';
+export type { FieldSchema, Feature, FeatureContext, JointState, JointSequence, LineSpans, FieldSpan, Feedback, TransitionWeights, BoundaryState, RecordSpan, SubEntitySpan } from './lib/types.js';
 export { defaultTransitions } from './lib/types.js';
 export {
   decodeJointSequence,
@@ -8,6 +8,7 @@ export {
   annotateEntityTypesInSequence
 } from './lib/viterbi.js';
 export { spanGenerator } from './lib/utils.js';
+export { boundaryFeatures, segmentFeatures } from "./lib/features.js"
 
 
 

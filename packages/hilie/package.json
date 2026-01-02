@@ -1,0 +1,19 @@
+{
+  "name": "hilie",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node dist/tests/test.js",
+    "unit-test": "npm run build && node dist/tests/unit.test.js",
+    "generate": "npm run build && node dist/scripts/convert.js"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
+  }
+}
