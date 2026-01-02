@@ -164,15 +164,14 @@ export function spanGenerator(
       if (parts.length >= maxPartsPerLine) break;
     }
 
-    // Generate spans for up to maxTokensPerSpan contiguous parts (n-grams)
-    outer: for (let i = 0; i < parts.length; i++) {
-      for (let k = 1; k <= maxTokensPerSpan && i + k <= parts.length; k++) {
-        const start = parts[i]!.start;
-        const end = parts[i + k - 1]!.end;
-        if (end - start >= minTokenLength) {
-          spans.push({ start, end });
-          if (spans.length >= maxSpansPerLine) break outer;
-        }
+    // Generate non-overlapping spans (single parts only to avoid overlap)
+    // Previously this generated all n-grams which created overlapping candidates
+    for (let i = 0; i < parts.length; i++) {
+      const start = parts[i]!.start;
+      const end = parts[i]!.end;
+      if (end - start >= minTokenLength) {
+        spans.push({ start, end });
+        if (spans.length >= maxSpansPerLine) break;
       }
     }
 
@@ -186,6 +185,56 @@ export function spanGenerator(
       }
     }
 
-    return { lineIndex, spans };
+    // Fill gaps to ensure every character is covered by exactly one span
+    // Sort spans by start position
+    spans.sort((a, b) => a.start - b.start);
+    const filledSpans: Array<{ start: number; end: number }> = [];
+    let pos = 0;
+
+    for (const span of spans) {
+      // If there's a gap before this span, create a span to fill it
+      if (pos < span.start) {
+        filledSpans.push({ start: pos, end: span.start });
+      }
+      // Add the content span
+      filledSpans.push(span);
+      pos = span.end;
+    }
+
+    // Fill any remaining gap at the end of the line
+    if (pos < line.length) {
+      filledSpans.push({ start: pos, end: line.length });
+    }
+
+    // Handle empty lines - create a single span covering the entire (empty) line
+    if (filledSpans.length === 0 && line.length > 0) {
+      filledSpans.push({ start: 0, end: line.length });
+    }
+
+    // Merge adjacent whitespace-only spans greedily (prefer longer contiguous whitespace)
+    const mergedSpans: Array<{ start: number; end: number }> = [];
+    for (const span of filledSpans) {
+      const text = line.slice(span.start, span.end);
+      const isWhitespace = /^\s*$/.test(text);
+      
+      if (isWhitespace && mergedSpans.length > 0) {
+        const lastSpan = mergedSpans[mergedSpans.length - 1]!;
+        const lastText = line.slice(lastSpan.start, lastSpan.end);
+        const lastIsWhitespace = /^\s*$/.test(lastText);
+        
+        if (lastIsWhitespace) {
+          // Merge with previous whitespace span
+          lastSpan.end = span.end;
+          continue;
+        }
+      }
+      
+      mergedSpans.push(span);
+    }
+
+    // Enforce maxSpansPerLine after all processing
+    const finalSpans = mergedSpans.slice(0, maxSpansPerLine);
+
+    return { lineIndex, spans: finalSpans };
   });
 }

@@ -23,7 +23,7 @@ A compact library demonstrating Viterbi-based boundary and joint decoding for si
 
 A short glossary for domain terms and named identifiers used across the codebase:
 
-- **Joint** — short for a joint decoding pass (see `jointViterbiDecode`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels. A per-line `JointState` typically contains a `boundary` code (`B` = boundary/start, `C` = continuation) and a `fields` array of label assignments.
+- **Joint** — short for a joint decoding pass (see `jointViterbiDecode`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels. A per-line `JointState` typically contains a `boundary` code (`B` = boundary/start, `C` = continuation) and a `fields` array of label assignments; a `JointSequence` is the array of per-line `JointState` entries that represents the full document decode.
 
 - **Annotation / Feedback** — user-provided corrections (e.g., in a human-in-the-loop workflow). Feedback is represented as an `entities` array with one or more asserted fields; each field has `action` (`add` | `remove`), `fieldType` (e.g., `Phone`), `start`/`end` offsets, and a `confidence`. Use `updateWeightsFromFeedback` to apply these annotations to model weights.
 
@@ -41,23 +41,11 @@ A short glossary for domain terms and named identifiers used across the codebase
   - `updateWeightsFromExample` / `updateWeightsFromFeedback` — trainer update functions for example-based and feedback-driven weight adjustments.
   - `spanGenerator`, `enumerateStates` — span proposal and candidate-state enumerator helpers.
 
+- **Nudge** — a targeted, calibrated update applied when straightforward feedback updates do not flip a model's prediction. Implemented by `updateWeightsFromFeedback` (helper `tryNudge`), a nudge identifies one or more features (e.g., `segment.is_phone`, `segment.is_email`, `segment.is_extid`) whose weight changes would most increase the score gap in favor of the asserted label, and then applies a scaled adjustment (respecting the learning rate and feedback confidence) to push the model toward the requested behavior.
+
 - **Feature name examples** — feature keys you may see in diagnostics or weight dumps: `segment.is_phone`, `segment.is_email`, `segment.is_extid`, `line.leading_extid`, `line.has_birthdate`, `line.lexical_similarity_drop`.
 
 > Note: The public JS/TS API is exported from `src/index.ts`; prefer the canonical names above when integrating with downstream tooling.
-
-## How the code maps to the idea
-
-- `src/lib/features.ts` implements feature primitives and exposes `segmentFeatures` and `boundaryFeatures` arrays used by the decoders.
-- `src/lib/viterbi.ts` implements core DP routines and supporting helpers (emission, transition scoring, enumerate states).
-- `src/lib/utils.ts` contains small utility helpers `spanGenerator` used in tests and demos.
-
-**`spanGenerator`**
-- A more robust span proposal function that:
-  - Splits lines by common delimiters (pipes, commas, semicolons, tabs, or runs of spaces) by default
-  - Produces token n-gram spans (up to a configurable window size)
-  - Falls back to word token spans if no delimiters are found
-- Use by replacing calls to `spanGenerator(lines, { /* options */ })` where options are optional.
-- `src/index.ts` re-exports the public API for convenience.
 
 ## How the code maps to the idea
 

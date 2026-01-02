@@ -1,5 +1,5 @@
 import { spanGenerator, detectDelimiter } from '../lib/utils.js';
-import { enumerateStates, extractFeatureVector, jointViterbiDecode, updateWeightsFromExample, updateWeightsFromFeedback, entitiesFromJoint } from '../lib/viterbi.js';
+import { enumerateStates, extractJointFeatureVector, decodeJointSequence, updateWeightsFromGoldSequence, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
 import { readFileSync } from 'fs';
 
@@ -179,8 +179,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(phoneSupported, 'enumerateStates should include at least one state that assigns Phone to a phone-like span');
 
   // For email, ensure decoder can pick Email via joint decode (the email case earlier was successful)
-  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
-  const emailLine = joint[1]!.fields;
+  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  const emailLine = jointSeq[1]!.fields;
   ok(emailLine.includes('Email'), 'decoder should label email-like span as Email');
 
   console.log('✓ segment feature influence on decoding (enum+decode checks)');
@@ -199,22 +199,22 @@ console.log('Unit tests: spanGenerator & enumerateStates');
     'segment.is_phone': 10.0
   } as any;
 
-  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 512 });
+  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 512 });
 
   // Line 0 should include an ExtID and a FullName/PreferredName assignment on some spans
-  const line0 = joint[0]!.fields;
-  const hasExtID = line0.some(f => f === 'ExtID');
-  const hasFullOrPref = line0.some(f => f === 'Name' || f === 'PreferredName');
+  const line0 = jointSeq[0]!.fields;
+  const hasExtID = line0.some((f: any) => f === 'ExtID');
+  const hasFullOrPref = line0.some((f: any) => f === 'Name' || f === 'PreferredName');
   ok(hasExtID, 'decoder should assign ExtID on the first line where present');
   ok(hasFullOrPref, 'decoder should assign FullName or PreferredName on the first line');
 
   // Line 1 should include Birthdate
-  const line1 = joint[1]!.fields;
-  ok(line1.some(f => f === 'Birthdate'), 'decoder should assign Birthdate for the DOB-like span');
+  const line1 = jointSeq[1]!.fields;
+  ok(line1.some((f: any) => f === 'Birthdate'), 'decoder should assign Birthdate for the DOB-like span');
 
   // Line 2 is exact 10-digit string; despite ExtID heuristics, it should be treated as Phone
-  const line2 = joint[2]!.fields;
-  ok(line2.some(f => f === 'Phone'), 'exact 10-digit numeric should prefer Phone over ExtID');
+  const line2 = jointSeq[2]!.fields;
+  ok(line2.some((f: any) => f === 'Phone'), 'exact 10-digit numeric should prefer Phone over ExtID');
 
   console.log('✓ segment features for ExtID/Name/Birthdate decoding');
 })();
@@ -234,14 +234,14 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const before = { ...w };
 
-  const res = updateWeightsFromExample(lines2, spans2, gold, w, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromGoldSequence(lines2, spans2, gold, w, 1.0, { maxStates: 64 });
 
   // after training, weight for 'segment.is_phone' should increase (positive update)
   ok((w['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'training should increase phone feature weight');
 
   // extractFeatureVector sanity: gold vector produces higher phone-related contribution
-  const vf = extractFeatureVector(lines2, spans2, gold);
-  const vp = extractFeatureVector(lines2, spans2, res.pred);
+  const vf = extractJointFeatureVector(lines2, spans2, gold);
+  const vp = extractJointFeatureVector(lines2, spans2, res.pred);
   ok((vf['segment.is_phone'] ?? 0) >= (vp['segment.is_phone'] ?? 0), 'gold feature count should be >= pred for phone');
 
   console.log('✓ trainer feature extraction and weight update');
@@ -255,15 +255,15 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const weights: any = { 'line.leading_extid': 12.0, 'line.has_name': 6.0, 'line.short_token_count': 2.0, 'segment.is_phone': 4.0, 'segment.is_email': 4.0 };
 
-  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
-  ok(joint[0]!.boundary === 'B', 'leading ExtID should produce a Boundary B');
+  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  ok(jointSeq[0]!.boundary === 'B', 'leading ExtID should produce a Boundary B');
 
   // Birthdate-only line should be recognized as boundary
   const lines2 = ['05/12/2013', 'John Doe', '410-555-1234'];
   const spans2 = spanGenerator(lines2, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
   const weights2: any = { 'line.has_birthdate': 6.0, 'segment.is_phone': 3.0 };
 
-  const joint2 = jointViterbiDecode(lines2, spans2, weights2, { maxStates: 256 });
+  const joint2 = decodeJointSequence(lines2, spans2, weights2, { maxStates: 256 });
   ok(joint2[0]!.boundary === 'B', 'birthdate line should be treated as a Boundary');
 
   // Next line contact hint: preceding line with nextHasContact set should prefer B
@@ -271,8 +271,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const spans3 = spanGenerator(lines3, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
   const weights3: any = { 'line.next_has_contact': 6.0, 'segment.is_phone': 6.0 };
 
-  const joint3 = jointViterbiDecode(lines3, spans3, weights3, { maxStates: 256 });
-  ok(joint3[0]!.boundary === 'B', 'line preceding contact should be Boundary');
+  const jointSeq3 = decodeJointSequence(lines3, spans3, weights3, { maxStates: 256 });
+  ok(jointSeq3[0]!.boundary === 'B', 'line preceding contact should be Boundary');
 
   console.log('✓ boundary features influence decoding');
 })();
@@ -288,8 +288,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   // joint decode should run without error and prefer Phone on the phone span
   const weights: any = { 'segment.is_phone': 5.0 };
-  const joint = jointViterbiDecode(lines, spans, weights, { maxStates: 256 });
-  ok(joint.length === 1, 'single-line joint produced');
+  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  ok(jointSeq.length === 1, 'single-line joint produced');
 
   console.log('✓ blank segments ignored and treated as absent');
 })();
@@ -301,14 +301,14 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const spans = lines.map((ln, i) => ({ lineIndex: i, spans: [{ start: 0, end: ln.length }] }));
 
   // construct a joint that marks the first line as Primary and the second as Guardian
-  const joint: any = [
+  const jointSeq: any = [
     { boundary: 'B', fields: [], entityType: 'Primary' },
     { boundary: 'C', fields: [], entityType: 'Guardian' },
     { boundary: 'C', fields: [] }
   ];
 
-  const records = entitiesFromJoint(lines, spans as any, joint, undefined as any);
-  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJoint should return one top-level record');
+  const records = entitiesFromJointSequence(lines, spans as any, jointSeq, undefined as any);
+  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
 
   const rec = records[0]!;
   ok(Array.isArray(rec.subEntities) && rec.subEntities.length === 2, 'record should contain two sub-entities (Primary + Guardian)');
@@ -381,7 +381,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
       { boundary: 'B', fields: spans[1]!.spans.map((_) => 'NOISE') }, 
       { boundary: 'B', fields: spans[2]!.spans.map((_) => 'NOISE') }];
 
-    const predBefore = jointViterbiDecode(firstThree, spans, { ...w }, { maxStates: 512 });
+    const predBefore = decodeJointSequence(firstThree, spans, { ...w }, { maxStates: 512 });
 
     // ensure our initial guess may be imperfect (not exactly gold)
     // const matchesBefore = predBefore[0]!.fields.every((f: string, i: number) => f === gold0.fields[i]);
@@ -389,12 +389,12 @@ console.log('Unit tests: spanGenerator & enumerateStates');
     // Run a few epochs training on first record only
     for (let epoch = 0; epoch < 5; epoch++) {
       // cast gold to any to satisfy test typing convenience
-      updateWeightsFromExample(firstThree, spans, gold as any, w, 1.0, { maxStates: 512 });
+      updateWeightsFromGoldSequence(firstThree, spans, gold as any, w, 1.0, { maxStates: 512 });
     }
 
     console.log('TRAINED weights for', c.errPrefix, JSON.stringify(w, null, 2));
 
-    const jointAfter = jointViterbiDecode(firstThree, spans, w, { maxStates: 512 });
+    const jointAfter = decodeJointSequence(firstThree, spans, w, { maxStates: 512 });
 
     // After training, first record should match gold on at least the primary non-NOISE labels
     const expectedSet = new Set(gold0.fields.filter((x: string) => x !== 'NOISE'));
@@ -430,7 +430,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   // run multiple epochs over the single example (simulates repeated feedback)
   for (let epoch = 0; epoch < 6; epoch++) {
-    const r = updateWeightsFromExample(lines, spans, gold, w, 1.0, { maxStates: 64 });
+    const r = updateWeightsFromGoldSequence(lines, spans, gold, w, 1.0, { maxStates: 64 });
     // ensure updateWeightsFromExample returns a pred and doesn't throw
     ok(Array.isArray(r.pred), 'trainer returned a prediction each epoch');
   }
@@ -439,21 +439,21 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok((w['segment.is_phone'] ?? 0) > beforeWeight, 'multi-epoch training should increase phone feature weight');
 
   // decoder should now prefer Phone on this example
-  const jointAfter = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
-  ok(jointAfter[0]!.fields.some(f => f === 'Phone'), 'after multi-epoch training the decoder should pick Phone');
+  const jointAfter = decodeJointSequence(lines, spans, w, { maxStates: 64 });
+  ok(jointAfter[0]!.fields.some((f: any) => f === 'Phone'), 'after multi-epoch training the decoder should pick Phone');
 
   console.log('✓ multi-iteration trainer harness improves phone weight and prediction');
 })();
 
-// New: entitiesFromJoint and feedback-based training
+// New: entitiesFromJointSequence and feedback-based training
 (() => {
   const lines = ['#12345 John Doe\t410-555-1212\tjohn@example.com'];
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
   const w: any = { 'segment.is_phone': 2.0, 'segment.is_email': 2.0, 'segment.is_extid': 2.0, 'segment.is_name': 1.0 };
-  const joint = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+  const jointSeq = decodeJointSequence(lines, spans, w, { maxStates: 64 });
 
-  const records = entitiesFromJoint(lines, spans, joint, w as any);
-  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJoint should return one top-level record');
+  const records = entitiesFromJointSequence(lines, spans, jointSeq, w as any);
+  ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
   const rec = records[0]!;
   ok(Array.isArray(rec.subEntities) && rec.subEntities.length >= 1, 'record should contain sub-entities');
 
@@ -466,13 +466,13 @@ console.log('Unit tests: spanGenerator & enumerateStates');
     ok(typeof (f.confidence ?? 0) === 'number', 'confidence present (numeric)');
   }
 
-  console.log('✓ entitiesFromJoint produced nested record/sub-entity field spans');
+  console.log('✓ entitiesFromJointSequence produced nested record/sub-entity field spans');
 
   // Feedback-driven weight update: assert the phone span should be Phone
   const lines2 = ['Contact: +1 555-123-4567'];
   const spans2 = spanGenerator(lines2, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
   const w2: any = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
-  const predBefore = jointViterbiDecode(lines2, spans2, w2, { maxStates: 64 });
+  const predBefore = decodeJointSequence(lines2, spans2, w2, { maxStates: 64 });
 
   const phoneSpan = spans2[0]!.spans.find(s => /\d{3,}/.test(lines2[0]!.slice(s.start, s.end)));
   ok(!!phoneSpan, 'found a phone-like span to assert');
@@ -480,12 +480,12 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: phoneSpan!.start, end: phoneSpan!.end, fieldType: 'Phone', confidence: 1.0, action: 'add' } ] } ] } as any;
 
   const before = { ...w2 };
-  const res = updateWeightsFromFeedback(lines2, spans2, predBefore, feedback, w2, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines2, spans2, predBefore, feedback, w2, 1.0, { maxStates: 64 });
 
   ok((w2['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'feedback update should increase phone weight');
 
   const predAfter = res.pred;
-  ok(predAfter[0]!.fields.some(f => f === 'Phone'), 'after feedback-based update the decoder should predict Phone');
+  ok(predAfter[0]!.fields.some((f: any) => f === 'Phone'), 'after feedback-based update the decoder should predict Phone');
 
   console.log('✓ feedback-based weight update works');
 })();
@@ -495,8 +495,8 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines = ['Contact: +1 555-000-1111'];
   const spans = spanGenerator(lines, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
   const w: any = { 'segment.is_phone': 5.0, 'segment.token_count_bucket': 0.1 };
-  const predBefore = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
-  ok(predBefore[0]!.fields.some(f => f === 'Phone'), 'sanity: predBefore picks Phone');
+  const predBefore = decodeJointSequence(lines, spans, w, { maxStates: 64 });
+  ok(predBefore[0]!.fields.some((f: any) => f === 'Phone'), 'sanity: predBefore picks Phone');
 
   const phoneSpan = spans[0]!.spans.find(s => /\d{3,}/.test(lines[0]!.slice(s.start, s.end)));
   ok(!!phoneSpan, 'found phone-like span');
@@ -505,7 +505,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const before = { ...w };
   const originalCount = spans[0]!.spans.length;
-  const res = updateWeightsFromFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
 
   // removal: ensure the asserted span was removed from the spans used for prediction
   ok(res.pred[0]!.fields.length === originalCount - 1, 'after remove feedback the predicted fields should reflect the removed span');
@@ -521,7 +521,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines = ['#A12345\tjohn@example.com\t+1 555-111-2222'];
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
   const w: any = { 'segment.is_extid': -3.0, 'segment.is_email': -3.0, 'segment.is_phone': -3.0 };
-  const predBefore = jointViterbiDecode(lines, spans, w, { maxStates: 64 });
+  const predBefore = decodeJointSequence(lines, spans, w, { maxStates: 64 });
 
   const extSpan = spans[0]!.spans.find(s => isLikelyExtID(lines[0]!.slice(s.start, s.end)));
   const emailSpan = spans[0]!.spans.find(s => isLikelyEmail(lines[0]!.slice(s.start, s.end)));
@@ -535,7 +535,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ] } ] } as any;
 
   const before = { ...w };
-  const res = updateWeightsFromFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
 
   // The update should either increase the detector weight OR the asserted label should already be predicted.
   const predAfter = res.pred;

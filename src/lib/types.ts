@@ -56,6 +56,10 @@ export interface JointState {
   entityType?: EntityType;
 }
 
+// A sequence of per-line joint assignments; use this alias for clarity when
+// passing around an entire document's joint decode result.
+export type JointSequence = JointState[];
+
 export interface Relationship {
   primaryIndex: number;
   guardianIndex: number;

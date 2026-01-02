@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { jointViterbiDecode, spanGenerator } from '../index.js';
+import { entitiesFromJointSequence, jointViterbiDecode, spanGenerator } from '../index.js';
 
 async function runDataDrivenTests() {
   let files: string[] = [];
@@ -50,10 +50,14 @@ async function runDataDrivenTests() {
 
     const spansPerLine = spanGenerator(lines);
 
-    const joint = jointViterbiDecode(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
+    const jointSeq = jointViterbiDecode(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
 
-    joint.slice(0, 10).forEach((state, i) => {
-      console.log(JSON.stringify(state, null, 2));
+    const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights);
+
+    records.slice(0, 3).forEach((record, i) => {
+      console.log();
+      console.log(content.slice(record.fileStart, record.fileEnd + 1));
+      console.log(JSON.stringify(record, null, 2));
     });
   }
 }

@@ -63,3 +63,48 @@ export function isLikelyPreferredName(s: string | undefined): boolean {
   if (/^[A-Za-z\-']{1,20}$/.test(t) && t.length <= 16) return true;
   return false;
 }
+// Lexical/Gazetteer helper: check if text contains a month name
+export function containsMonth(s: string | undefined): boolean {
+  if (!s) return false;
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const lowerText = s.toLowerCase();
+  return months.some(month => lowerText.includes(month));
+}
+
+// Lexical/Gazetteer helper: check if text contains day suffix (1st, 2nd, 3rd, etc.)
+export function containsDaySuffix(s: string | undefined): boolean {
+  if (!s) return false;
+  return /\b\d{1,2}(?:st|nd|rd|th)\b/i.test(s);
+}
+
+// Lexical/Gazetteer helper: check if text is a common first name
+export function isCommonFirstName(s: string | undefined): boolean {
+  if (!s) return false;
+  const text = s.trim();
+  
+  // Top 100 most common first names (abbreviated list for demonstration)
+  const commonNames = new Set([
+    'james', 'mary', 'john', 'patricia', 'robert', 'jennifer', 'michael', 'linda',
+    'william', 'barbara', 'david', 'elizabeth', 'richard', 'susan', 'joseph', 'jessica',
+    'thomas', 'sarah', 'charles', 'karen', 'christopher', 'nancy', 'daniel', 'lisa',
+    'matthew', 'betty', 'anthony', 'margaret', 'mark', 'sandra', 'donald', 'ashley',
+    'steven', 'dorothy', 'paul', 'kimberly', 'andrew', 'emily', 'joshua', 'donna',
+    'kenneth', 'michelle', 'kevin', 'carol', 'brian', 'amanda', 'george', 'melissa',
+    'edward', 'deborah', 'ronald', 'stephanie', 'timothy', 'rebecca', 'jason', 'sharon',
+    'jeffrey', 'laura', 'ryan', 'cynthia', 'jacob', 'kathleen', 'gary', 'amy',
+    'nicholas', 'shirley', 'eric', 'angela', 'jonathan', 'helen', 'stephen', 'anna',
+    'larry', 'brenda', 'justin', 'pamela', 'scott', 'nicole', 'brandon', 'emma',
+    'benjamin', 'samantha', 'samuel', 'katherine', 'frank', 'christine', 'gregory', 'debra',
+    'alexander', 'rachel', 'raymond', 'catherine', 'patrick', 'carolyn', 'jack', 'janet',
+    'dennis', 'ruth', 'jerry', 'maria', 'tyler', 'heather', 'aaron', 'diane',
+    // Modern popular names
+    'noah', 'liam', 'oliver', 'elijah', 'william', 'james', 'benjamin', 'lucas',
+    'henry', 'alexander', 'mason', 'michael', 'ethan', 'daniel', 'jacob', 'logan',
+    'jackson', 'levi', 'sebastian', 'mateo', 'jack', 'owen', 'theodore', 'aiden',
+    'olivia', 'emma', 'ava', 'sophia', 'isabella', 'charlotte', 'amelia', 'mia',
+    'harper', 'evelyn', 'abigail', 'emily', 'ella', 'elizabeth', 'camila', 'luna',
+    'sofia', 'avery', 'mila', 'aria', 'scarlett', 'penelope', 'layla', 'chloe'
+  ]);
+  
+  return commonNames.has(text.toLowerCase());
+}

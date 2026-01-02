@@ -1,4 +1,4 @@
-import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, Relationship, FieldSpan, Feedback, RecordSpan, SubEntitySpan, SubEntityType } from './types.js';
+import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, FieldSpan, Feedback, JointSequence, RecordSpan, SubEntitySpan, SubEntityType } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
 interface VCell {
@@ -139,9 +139,9 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
  *   to keep the inner loop efficient.
  * - Uses `transitionScore` to bias transitions between `JointState`s.
  *
- * Returns: the best-scoring `JointState[]` (one entry per input line).
+ * Returns: the best-scoring `JointSequence` (one entry per input line).
  */
-export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: EnumerateOptions): JointState[] {
+export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: EnumerateOptions): JointSequence {
   const lattice: VCell[][] = [];
   const stateSpaces: JointState[][] = [];
 
@@ -213,9 +213,17 @@ export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], f
       let fcontrib = 0;
       for (let k = 0; k < s.fields.length; k++) {
         const label = s.fields[k];
+        const txt: string = spanTextCache[t]?.[k] ?? '';
+        
+        // Whitespace-only spans should always be NOISE - heavily penalize non-NOISE labels
+        const isWhitespace = /^\s*$/.test(txt);
+        if (isWhitespace && label !== 'NOISE') {
+          fcontrib -= 100; // Large penalty for labeling whitespace as non-NOISE
+          continue;
+        }
+        
         if (label === 'NOISE') continue;
         const featsRec: Record<string, number> = spanFeatureCache[t]?.[k] ?? {};
-        const txt: string = spanTextCache[t]?.[k] ?? '';
         const exact10or11: boolean = spanExact10or11[t]?.[k] ?? false;
 
         for (const fid of Object.keys(featsRec)) {
@@ -291,17 +299,17 @@ export function jointViterbiDecode(lines: string[], spansPerLine: LineSpans[], f
  *
  * Purpose: compute an additive feature vector (mapping id -> numeric count)
  * by summing boundary-level and span-level feature contributions according to
- * the labels present in `joint` so that learning updates can compare
+ * the labels present in the provided `JointSequence` so that learning updates can compare
  * gold vs. predicted vectors.
  *
  * Returns: a sparse map from feature id to numeric contribution.
  */
-export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[], joint: JointState[]): Record<string, number> {
+export function extractJointFeatureVector(lines: string[], spansPerLine: LineSpans[], jointSeq: JointSequence): Record<string, number> {
   const vec: Record<string, number> = {};
 
   // boundary features (line-level)
-  for (let i = 0; i < joint.length; i++) {
-    const state = joint[i]!;
+  for (let i = 0; i < jointSeq.length; i++) {
+    const state = jointSeq[i]!;
     const ctx: FeatureContext = { lineIndex: i, lines };
     for (const f of boundaryFeatures) {
       const v = f.apply(ctx);
@@ -311,8 +319,8 @@ export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[],
   }
 
   // segment features (span-level)
-  for (let i = 0; i < joint.length; i++) {
-    const state = joint[i]!;
+  for (let i = 0; i < jointSeq.length; i++) {
+    const state = jointSeq[i]!;
     const spans = spansPerLine[i]!;
 
     for (let si = 0; si < spans.spans.length; si++) {
@@ -362,13 +370,13 @@ export function extractFeatureVector(lines: string[], spansPerLine: LineSpans[],
  * mutates the provided `weights` object and returns it along with the
  * prediction used for the update.
  */
-export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpans[], gold: JointState[], weights: Record<string, number>, lr = 1.0, enumerateOpts?: EnumerateOptions): { updated: Record<string, number>; pred: JointState[] } {
+export function updateWeightsFromGoldSequence(lines: string[], spansPerLine: LineSpans[], goldSeq: JointSequence, weights: Record<string, number>, lr = 1.0, enumerateOpts?: EnumerateOptions): { updated: Record<string, number>; pred: JointSequence } {
   // Predict with current weights
-  const pred = jointViterbiDecode(lines, spansPerLine, weights, enumerateOpts);
+  const pred = decodeJointSequence(lines, spansPerLine, weights, enumerateOpts);
 
   // Extract feature vectors for gold and pred
-  const vGold = extractFeatureVector(lines, spansPerLine, gold);
-  const vPred = extractFeatureVector(lines, spansPerLine, pred);
+  const vGold = extractJointFeatureVector(lines, spansPerLine, goldSeq);
+  const vPred = extractJointFeatureVector(lines, spansPerLine, pred);
 
   // Apply perceptron-like update: w += lr * (vGold - vPred)
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
@@ -387,13 +395,13 @@ export function updateWeightsFromExample(lines: string[], spansPerLine: LineSpan
  * Intent: use lightweight boundary features and role-keyword signals to label
  * boundary lines with likely entity roles, then enforce simple contiguity
  * constraints (e.g., Guardians should have a nearby Primary). Returns a new
- * `JointState[]` array with `entityType` set for boundary entries.
+ * `JointSequence` array with `entityType` set for boundary entries.
  */
-export function annotateEntityTypes(lines: string[], joint: JointState[]): JointState[] {
+export function annotateEntityTypesInSequence(lines: string[], jointSeq: JointSequence): JointSequence {
   // Compute per-line feature scores using boundaryFeatures
   const featuresPerLine: Record<number, Record<string, number>> = {};
 
-  for (let i = 0; i < joint.length; i++) {
+  for (let i = 0; i < jointSeq.length; i++) {
     const ctx: FeatureContext = { lineIndex: i, lines };
     const feats: Record<string, number> = {};
     for (const f of boundaryFeatures) {
@@ -429,7 +437,7 @@ export function annotateEntityTypes(lines: string[], joint: JointState[]): Joint
   };
 
   // Initial label assignments based on scores
-  const assigned = joint.map((s) => ({ ...s }));
+  const assigned = jointSeq.map((s) => ({ ...s }));
 
   for (let i = 0; i < assigned.length; i++) {
     const cell = assigned[i]!;
@@ -496,7 +504,7 @@ export function annotateEntityTypes(lines: string[], joint: JointState[]): Joint
 /**
  * Convert a joint decode into a structured collection of records and sub-entities.
  *
- * Purpose: take a predicted or gold `joint` (per-line boundary+fields assignments)
+ * Purpose: take a predicted or gold `JointSequence` (per-line boundary+fields assignments)
  * and produce an array of `RecordSpan` objects where each top-level record contains
  * grouped `SubEntitySpan` children (Primary/Guardian) with `FieldSpan` entries.
  * The function computes file-relative offsets, per-field confidences (when
@@ -505,12 +513,12 @@ export function annotateEntityTypes(lines: string[], joint: JointState[]): Joint
  * Parameters:
  * - lines: array of document lines
  * - spansPerLine: candidate spans for each line
- * - joint: per-line `JointState[]` assignments (may or may not include entityType)
+ * - jointSeq: per-line `JointSequence` assignments (may or may not include entityType)
  * - featureWeights: optional weights used to compute softmax confidences per field
  *
  * Returns: a `RecordSpan[]` describing the inferred records and their sub-entities.
  */
-export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], joint: JointState[], featureWeights?: Record<string, number>): RecordSpan[] {
+export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpans[], jointSeq: JointSequence, featureWeights?: Record<string, number>): RecordSpan[] {
   // compute line offsets
   const offsets: number[] = [];
   let off = 0;
@@ -529,6 +537,14 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
   // helper to score labels for a single span
   function scoreLabelForSpan(lineIndex: number, spanIdx: number, label: FieldLabel): number {
     const sctx: FeatureContext = { lineIndex, lines, candidateSpan: { lineIndex, start: spansPerLine[lineIndex]!.spans[spanIdx]!.start, end: spansPerLine[lineIndex]!.spans[spanIdx]!.end } };
+    const txt = lines[lineIndex]?.slice(sctx.candidateSpan!.start, sctx.candidateSpan!.end) ?? '';
+    
+    // Whitespace-only spans should always be NOISE
+    const isWhitespace = /^\s*$/.test(txt);
+    if (isWhitespace && label !== 'NOISE') {
+      return -100; // Large penalty for labeling whitespace as non-NOISE
+    }
+    
     let score = 0;
     for (const f of segmentFeatures) {
       const v = f.apply(sctx);
@@ -561,8 +577,8 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
 
   const records: RecordSpan[] = [];
 
-  // If entityType is not present in the joint, annotate it using heuristics
-  const jointAnnotated = (!joint.some(s => s && s.entityType !== undefined)) ? annotateEntityTypes(lines, joint) : joint;
+  // If entityType is not present in the joint sequence, annotate it using heuristics
+  const jointAnnotated = (!jointSeq.some(s => s && s.entityType !== undefined)) ? annotateEntityTypesInSequence(lines, jointSeq) : jointSeq;
   const jointLocal = jointAnnotated;
 
   // find entity boundaries from joint states (lines with boundary === 'B')
@@ -591,10 +607,10 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
         const fileStart = offsets[li]! + s.start;
         const fileEnd = offsets[li]! + s.end;
         const text = lines[li]?.slice(s.start, s.end) ?? '';
-        const assignedLabel = (joint[li] && joint[li]!.fields && joint[li]!.fields[si]) ? joint[li]!.fields[si] : undefined;
+        const assignedLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[si]) ? jointSeq[li]!.fields[si] : undefined;
 
-        // approximate confidence via softmax over label scores if weights provided
-        let confidence = 1;
+        // compute confidence via softmax over label scores if weights provided
+        let confidence = 0.5; // default to moderate confidence when weights not provided
         if (featureWeights) {
           const labelScores: number[] = [];
           const labels: FieldLabel[] = ['ExtID','Name','PreferredName','Phone','Email','GeneralNotes','MedicalNotes','DietaryNotes','Birthdate','NOISE'];
@@ -655,7 +671,7 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
  * Parameters:
  * - lines: the document lines
  * - spansPerLine: candidate spans per line (may be modified internally)
- * - joint: current predicted joint assignment
+ * - jointSeq: current predicted joint assignment
  * - feedback: user-supplied feedback with entity/field add/remove assertions
  * - weights: mutable feature weight map to be updated in-place
  * - lr: learning rate (default 1.0)
@@ -663,15 +679,15 @@ export function entitiesFromJoint(lines: string[], spansPerLine: LineSpans[], jo
  *
  * Returns: object containing the updated weights and the post-update prediction.
  */
-export function updateWeightsFromFeedback(
+export function updateWeightsFromUserFeedback(
   lines: string[],
   spansPerLine: LineSpans[],
-  joint: JointState[],
+  jointSeq: JointSequence,
   feedback: Feedback,
   weights: Record<string, number>,
   lr = 1.0,
   enumerateOpts?: EnumerateOptions
-): { updated: Record<string, number>; pred: JointState[] } {
+): { updated: Record<string, number>; pred: JointSequence } {
   // Clone spans so we can modify
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }));
 
@@ -688,7 +704,6 @@ export function updateWeightsFromFeedback(
 
   for (const ent of feedback.entities ?? []) {
     const entStartLine = ent.startLine ?? null;
-    const entEndLine = ent.endLine ?? null;
 
     for (const f of ent.fields ?? []) {
       const li = f.lineIndex ?? entStartLine;
@@ -731,7 +746,7 @@ export function updateWeightsFromFeedback(
     }
   }
 
-  // Determine boundary choices: prefer feedback entity starts when provided, otherwise fall back to joint
+  // Determine boundary choices: prefer feedback entity starts when provided, otherwise fall back to the provided joint sequence
   const boundarySet = new Set<number>();
   for (const ent of feedback.entities ?? []) {
     if (ent.startLine !== undefined) boundarySet.add(ent.startLine);
@@ -745,26 +760,26 @@ export function updateWeightsFromFeedback(
       if (labelMap[key]) fields.push(labelMap[key]!);
       else {
         // fallback to predicted label if present at same index, otherwise NOISE
-        const predLabel = (joint[li] && joint[li]!.fields && joint[li]!.fields[0]) ? (function findMatching(){
+        const predLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[0]) ? (function findMatching(){
           // try to find span with same coords in original joint spans
           const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x=>x.start===sp.start && x.end===sp.end);
-          if (origIdx >= 0) return joint[li]!.fields[origIdx] ?? 'NOISE';
+          if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? 'NOISE';
           // else fallback to NOISE
           return 'NOISE' as FieldLabel;
         })() : 'NOISE' as FieldLabel;
         fields.push(predLabel);
       }
     }
-    const boundary: BoundaryState = boundarySet.has(li) ? 'B' : (joint[li] ? joint[li]!.boundary : 'C');
+    const boundary: BoundaryState = boundarySet.has(li) ? 'B' : (jointSeq[li] ? jointSeq[li]!.boundary : 'C');
     gold.push({ boundary, fields });
   }
 
   // Re-run prediction on the augmented spans
-  const pred = jointViterbiDecode(lines, spansCopy, weights, enumerateOpts);
+  const pred = decodeJointSequence(lines, spansCopy, weights, enumerateOpts);
 
   // extract feature vectors
-  const vGold = extractFeatureVector(lines, spansCopy, gold);
-  const vPred = extractFeatureVector(lines, spansCopy, pred);
+  const vGold = extractJointFeatureVector(lines, spansCopy, gold);
+  const vPred = extractJointFeatureVector(lines, spansCopy, pred);
 
   // apply scaled update: w += lr * meanConf * (vGold - vPred)
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
@@ -851,20 +866,17 @@ export function updateWeightsFromFeedback(
         return { boundary: 'C', fields: [ 'NOISE' ] } as JointState;
       });
 
-      const vPredSpan = extractFeatureVector(lines, spansSingle, jointPred);
-      const vGoldSpan = extractFeatureVector(lines, spansSingle, jointGold);
+      const vPredSpan = extractJointFeatureVector(lines, spansSingle, jointPred);
+      const vGoldSpan = extractJointFeatureVector(lines, spansSingle, jointGold);
 
       // Phone-specific debug removed
 
       const keys = new Set<string>([...Object.keys(vPredSpan), ...Object.keys(vGoldSpan)]);
       for (const k of keys) {
         const delta = (vGoldSpan[k] ?? 0) - (vPredSpan[k] ?? 0);
-        const beforeVal = (weights[k] ?? 0);
         // Use the field's confidence as the scaling factor for the removal
         // update so users can provide weaker/stronger signals.
         weights[k] = (weights[k] ?? 0) + lr * (f.confidence ?? 1.0) * delta;
-        const afterVal = weights[k];
-        // removal update diagnostic removed
       }
     }
   }
@@ -971,7 +983,7 @@ export function updateWeightsFromFeedback(
     }
 
     // re-run prediction on spansCopy to update pred
-    const newPred = jointViterbiDecode(lines, spansCopy, weights, enumerateOpts);
+    const newPred = decodeJointSequence(lines, spansCopy, weights, enumerateOpts);
     for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
   }
 
