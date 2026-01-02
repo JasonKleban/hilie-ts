@@ -1,6 +1,30 @@
 import path from 'path';
 import fs from 'fs/promises';
 import { entitiesFromJointSequence, decodeJointSequence, spanGenerator } from '../index.js';
+import type { FieldSchema } from '../lib/types.js';
+import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
+
+const bFeatures = boundaryFeatures;
+const sFeatures = segmentFeatures;
+
+/**
+ * Pre-built field schema for household information extraction.
+ * Defines the fields (ExtID, Name, Phone, Email, etc.) with their repeatability constraints.
+ */
+export const householdInfoSchema: FieldSchema = {
+  fields: [
+    { name: 'ExtID', maxAllowed: 1 },
+    { name: 'Name', maxAllowed: 2 },
+    { name: 'PreferredName', maxAllowed: 1 },
+    { name: 'Phone', maxAllowed: 3 },
+    { name: 'Email', maxAllowed: 3 },
+    { name: 'GeneralNotes', maxAllowed: 1 },
+    { name: 'MedicalNotes', maxAllowed: 1 },
+    { name: 'DietaryNotes', maxAllowed: 1 },
+    { name: 'Birthdate', maxAllowed: 1 }
+  ],
+  noiseLabel: 'NOISE'
+};
 
 async function runDataDrivenTests() {
   let files: string[] = [];
@@ -50,9 +74,9 @@ async function runDataDrivenTests() {
 
     const spansPerLine = spanGenerator(lines);
 
-    const jointSeq = decodeJointSequence(lines, spansPerLine, jointWeights, { maxStates: 512, safePrefix: 6, maxPhones: 2, maxEmails: 2 });
+    const jointSeq = decodeJointSequence(lines, spansPerLine, jointWeights, householdInfoSchema, bFeatures, sFeatures, { maxStates: 512, safePrefix: 6 });
 
-    const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights);
+    const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights, sFeatures, householdInfoSchema);
 
     records.slice(0, 3).forEach((record, i) => {
       console.log();

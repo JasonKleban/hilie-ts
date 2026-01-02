@@ -1,7 +1,13 @@
 import { spanGenerator, detectDelimiter } from '../lib/utils.js';
 import { enumerateStates, decodeJointSequence, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js';
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
+import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
+
+const schema = householdInfoSchema;
+const bFeatures = boundaryFeatures;
+const sFeatures = segmentFeatures;
 import { readFileSync } from 'fs';
+import { householdInfoSchema } from './test.js';
 
 function ok(cond: boolean, msg?: string) {
   if (!cond) throw new Error(msg || 'ok failed');
@@ -34,7 +40,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 // 3) enumerateStates simple case
 (() => {
   const lineSpans = [ { lineIndex: 0, spans: [ { start: 0, end: 1 }, { start: 0, end: 2 } ] }, { lineIndex: 1, spans: [ { start: 0, end: 1 } ] } ];
-  const states = enumerateStates(lineSpans[0] as any, { maxUniqueFields: 3 });
+  const states = enumerateStates(lineSpans[0] as any, schema, { maxUniqueFields: 3 });
   ok(Array.isArray(states) && states.length > 0, 'enumerateStates returns states');
   console.log('✓ enumerateStates simple case');
 })();
@@ -44,7 +50,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const perLine = 30; // many spans per line
   const spansPerLine = Array.from({ length: perLine }, (_, i) => ({ start: i, end: i + 1 }));
   const manyLines = Array.from({ length: 6 }, (v, idx) => ({ lineIndex: idx, spans: spansPerLine.slice() }));
-  const states = enumerateStates(manyLines[0] as any, { maxUniqueFields: 10, maxStates: 2048 });
+  const states = enumerateStates(manyLines[0] as any, schema, { maxUniqueFields: 10, maxStates: 2048 });
   ok(Array.isArray(states), 'enumerateStates returns an array');
   ok(states.length <= 2048, `states capped to reasonable limit (${states.length})`);
   console.log('✓ enumerateStates safety cap');
@@ -53,7 +59,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 // 5) edge case: empty input
 (() => {
   const emptyLine = { lineIndex: 0, spans: [] } as any;
-  const states = enumerateStates(emptyLine, { maxUniqueFields: 3 });
+  const states = enumerateStates(emptyLine, schema, { maxUniqueFields: 3 });
   ok(Array.isArray(states) && states.length === 2, 'empty spans -> two trivial states (B and C)');
   console.log('✓ enumerateStates empty input');
 })();
@@ -61,7 +67,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 // 6) allow repeated Phone labels up to cap
 (() => {
   const spans = { lineIndex: 0, spans: [ { start:0,end:1 }, { start:2,end:3 }, { start:4,end:5 } ] } as any;
-  const states = enumerateStates(spans, { maxUniqueFields: 3, maxPhones: 2 });
+  const states = enumerateStates(spans, schema, { maxUniqueFields: 3, maxStatesPerField: { 'Phone': 2 } });
   // should include at least one state with two Phones
   const hasTwoPhones = states.some(s => s.fields.slice(0,3).filter(f => f === 'Phone').length === 2);
   ok(hasTwoPhones, 'enumerateStates should allow up to 2 Phone labels');
@@ -74,7 +80,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 // 7) single-occurrence labels cannot duplicate
 (() => {
   const spans = { lineIndex: 0, spans: [ { start:0,end:1 }, { start:2,end:3 }, { start:4,end:5 } ] } as any;
-  const states = enumerateStates(spans, { maxUniqueFields: 4 });
+  const states = enumerateStates(spans, schema, { maxUniqueFields: 4 });
   const dupExtID = states.some(s => s.fields.slice(0,3).filter(f => f === 'ExtID').length >= 2);
   ok(!dupExtID, 'single-occurrence ExtID should not appear duplicated');
   console.log('✓ enumerateStates single-occurrence uniqueness');
@@ -170,7 +176,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   };
 
   // For robustness: ensure enumeration and features consider Phone/Email labels for phone/email-like spans
-  const stateBank = enumerateStates(spans[0] as any, { maxUniqueFields: 4, maxPhones: 3 });
+  const stateBank = enumerateStates(spans[0] as any, schema, { maxUniqueFields: 4, maxStatesPerField: { 'Phone': 3 } });
   const phoneSpanIndices = spans[0]!.spans.map((s, idx) => ({ idx, text: lines[0]!.slice(s.start, s.end) })).filter(x => isLikelyPhone(x.text)).map(x => x.idx);
 
   ok(phoneSpanIndices.length > 0, 'we should detect at least one phone-like candidate span');
@@ -179,7 +185,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ok(phoneSupported, 'enumerateStates should include at least one state that assigns Phone to a phone-like span');
 
   // For email, ensure decoder can pick Email via joint decode (the email case earlier was successful)
-  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  const jointSeq = decodeJointSequence(lines, spans, weights, schema, bFeatures, sFeatures, { maxStates: 256 });
   const emailLine = jointSeq[1]!.fields;
   ok(emailLine.includes('Email'), 'decoder should label email-like span as Email');
 
@@ -199,7 +205,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
     'segment.is_phone': 10.0
   } as any;
 
-  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 512 });
+  const jointSeq = decodeJointSequence(lines, spans, weights, schema, bFeatures, sFeatures, { maxStates: 512 });
 
   // Line 0 should include an ExtID and a FullName/PreferredName assignment on some spans
   const line0 = jointSeq[0]!.fields;
@@ -227,7 +233,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const weights: any = { 'line.leading_extid': 12.0, 'line.has_name': 6.0, 'line.short_token_count': 2.0, 'segment.is_phone': 4.0, 'segment.is_email': 4.0 };
 
-  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  const jointSeq = decodeJointSequence(lines, spans, weights, schema, bFeatures, sFeatures, { maxStates: 256 });
   ok(jointSeq[0]!.boundary === 'B', 'leading ExtID should produce a Boundary B');
 
   // Birthdate-only line should be recognized as boundary
@@ -235,7 +241,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const spans2 = spanGenerator(lines2, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
   const weights2: any = { 'line.has_birthdate': 6.0, 'segment.is_phone': 3.0 };
 
-  const joint2 = decodeJointSequence(lines2, spans2, weights2, { maxStates: 256 });
+  const joint2 = decodeJointSequence(lines2, spans2, weights2, schema, bFeatures, sFeatures, { maxStates: 256 });
   ok(joint2[0]!.boundary === 'B', 'birthdate line should be treated as a Boundary');
 
   // Next line contact hint: preceding line with nextHasContact set should prefer B
@@ -243,7 +249,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const spans3 = spanGenerator(lines3, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 });
   const weights3: any = { 'line.next_has_contact': 6.0, 'segment.is_phone': 6.0 };
 
-  const jointSeq3 = decodeJointSequence(lines3, spans3, weights3, { maxStates: 256 });
+  const jointSeq3 = decodeJointSequence(lines3, spans3, weights3, schema, bFeatures, sFeatures, { maxStates: 256 });
   ok(jointSeq3[0]!.boundary === 'B', 'line preceding contact should be Boundary');
 
   console.log('✓ boundary features influence decoding');
@@ -260,7 +266,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   // joint decode should run without error and prefer Phone on the phone span
   const weights: any = { 'segment.is_phone': 5.0 };
-  const jointSeq = decodeJointSequence(lines, spans, weights, { maxStates: 256 });
+  const jointSeq = decodeJointSequence(lines, spans, weights, schema, bFeatures, sFeatures, { maxStates: 256 });
   ok(jointSeq.length === 1, 'single-line joint produced');
 
   console.log('✓ blank segments ignored and treated as absent');
@@ -279,7 +285,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
     { boundary: 'C', fields: [] }
   ];
 
-  const records = entitiesFromJointSequence(lines, spans as any, jointSeq, undefined as any);
+  const records = entitiesFromJointSequence(lines, spans as any, jointSeq, undefined, sFeatures, schema);
   ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
 
   const rec = records[0]!;
@@ -305,9 +311,9 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines = ['#12345 John Doe\t410-555-1212\tjohn@example.com'];
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
   const w: any = { 'segment.is_phone': 2.0, 'segment.is_email': 2.0, 'segment.is_extid': 2.0, 'segment.is_name': 1.0 };
-  const jointSeq = decodeJointSequence(lines, spans, w, { maxStates: 64 });
+  const jointSeq = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 64 });
 
-  const records = entitiesFromJointSequence(lines, spans, jointSeq, w as any);
+  const records = entitiesFromJointSequence(lines, spans, jointSeq, w, sFeatures, schema);
   ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
   const rec = records[0]!;
   ok(Array.isArray(rec.subEntities) && rec.subEntities.length >= 1, 'record should contain sub-entities');
@@ -327,7 +333,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines2 = ['Contact: +1 555-123-4567'];
   const spans2 = spanGenerator(lines2, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
   const w2: any = { 'segment.is_phone': -5.0, 'segment.token_count_bucket': 0.1 };
-  const predBefore = decodeJointSequence(lines2, spans2, w2, { maxStates: 64 });
+  const predBefore = decodeJointSequence(lines2, spans2, w2, schema, bFeatures, sFeatures, { maxStates: 64 });
 
   const phoneSpan = spans2[0]!.spans.find(s => /\d{3,}/.test(lines2[0]!.slice(s.start, s.end)));
   ok(!!phoneSpan, 'found a phone-like span to assert');
@@ -335,7 +341,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: phoneSpan!.start, end: phoneSpan!.end, fieldType: 'Phone', confidence: 1.0, action: 'add' } ] } ] } as any;
 
   const before = { ...w2 };
-  const res = updateWeightsFromUserFeedback(lines2, spans2, predBefore, feedback, w2, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines2, spans2, predBefore, feedback, w2, bFeatures, sFeatures, schema, 1.0, { maxStates: 64 });
 
   ok((w2['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'feedback update should increase phone weight');
 
@@ -350,7 +356,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines = ['Contact: +1 555-000-1111'];
   const spans = spanGenerator(lines, { delimiterRegex: /:/, maxTokensPerSpan: 7 });
   const w: any = { 'segment.is_phone': 5.0, 'segment.token_count_bucket': 0.1 };
-  const predBefore = decodeJointSequence(lines, spans, w, { maxStates: 64 });
+  const predBefore = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 64 });
   ok(predBefore[0]!.fields.some((f: any) => f === 'Phone'), 'sanity: predBefore picks Phone');
 
   const phoneSpan = spans[0]!.spans.find(s => /\d{3,}/.test(lines[0]!.slice(s.start, s.end)));
@@ -360,7 +366,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
 
   const before = { ...w };
   const originalCount = spans[0]!.spans.length;
-  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 64 });
 
   // removal: ensure the asserted span was removed from the spans used for prediction
   ok(res.pred[0]!.fields.length === originalCount - 1, 'after remove feedback the predicted fields should reflect the removed span');
@@ -376,7 +382,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   const lines = ['#A12345\tjohn@example.com\t+1 555-111-2222'];
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
   const w: any = { 'segment.is_extid': -3.0, 'segment.is_email': -3.0, 'segment.is_phone': -3.0 };
-  const predBefore = decodeJointSequence(lines, spans, w, { maxStates: 64 });
+  const predBefore = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 64 });
 
   const extSpan = spans[0]!.spans.find(s => isLikelyExtID(lines[0]!.slice(s.start, s.end)));
   const emailSpan = spans[0]!.spans.find(s => isLikelyEmail(lines[0]!.slice(s.start, s.end)));
@@ -390,7 +396,7 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   ] } ] } as any;
 
   const before = { ...w };
-  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, 1.0, { maxStates: 64 });
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 64 });
 
   // The update should either increase the detector weight OR the asserted label should already be predicted.
   const predAfter = res.pred;

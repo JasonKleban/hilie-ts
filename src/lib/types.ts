@@ -28,22 +28,57 @@ export interface Feature {
 }
 
 export type BoundaryState = "B" | "C";
-export type FieldLabel =
-  | 'ExtID'
-  | 'Name'
-  | 'PreferredName'
-  | 'Phone'
-  | 'Email'
-  | 'GeneralNotes'
-  | 'MedicalNotes'
-  | 'DietaryNotes'
-  | 'Birthdate'
-  | 'NOISE';
 
+/**
+ * FieldLabel can be any string. The special 'NOISE' label represents
+ * unknown or non-field spans. All other labels are domain-defined.
+ */
+export type FieldLabel = string;
+
+/**
+ * FieldConfig describes a single field in the schema.
+ */
+export interface FieldConfig {
+  name: FieldLabel;
+  /**
+   * Whether this field must be present in every record.
+   * Defaults to false (field is optional).
+   */
+  required?: boolean;
+  /**
+   * Maximum number of times this field can appear.
+   * Defaults to 1 (field can appear at most once).
+   */
+  maxAllowed?: number;
+  /**
+   * Optional list of feature IDs that should be considered for this field.
+   * If not provided, all features are candidate.
+   */
+  applicableFeatures?: string[];
+  /**
+   * Optional list of validator function IDs (from validators map) to apply.
+   */
+  validators?: string[];
+}
+
+/**
+ * FieldSchema describes the complete field structure for a decoding task.
+ */
+export interface FieldSchema {
+  fields: FieldConfig[];
+  /**
+   * Special marker field that represents "not a field" or "noise".
+   * Usually "NOISE" but can be customized.
+   */
+  noiseLabel: FieldLabel;
+}
+
+/**
+ * EnumerateOptions controls the state space generation and constraints.
+ */
 export interface EnumerateOptions {
   maxUniqueFields?: number; // distinct non-NOISE fields allowed
-  maxPhones?: number; // cap for repeatable Phone labels
-  maxEmails?: number; // cap for repeatable Email labels
+  maxStatesPerField?: Record<FieldLabel, number>; // per-field multiplicity caps (replaces maxPhones, maxEmails)
   safePrefix?: number; // how many spans to fully enumerate before tailing with NOISE
   maxStates?: number; // overall state cap to avoid explosion
 }

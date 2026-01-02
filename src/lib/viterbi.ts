@@ -1,4 +1,4 @@
-import type { FieldLabel, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, FieldSpan, Feedback, JointSequence, RecordSpan, SubEntitySpan, SubEntityType } from './types.js';
+import type { FieldLabel, FieldSchema, FieldConfig, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, FieldSpan, Feedback, JointSequence, RecordSpan, SubEntitySpan, SubEntityType, Feature } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
 
 interface VCell {
@@ -39,31 +39,49 @@ function transitionScore(prev: JointState, curr: JointState, weights: Record<str
  * Enumerate plausible per-line JointState assignments for a set of candidate spans.
  *
  * Responsibility: generate a bounded, practical search space of label assignments
- * for a single line's spans (used by `jointViterbiDecode` when building the state
+ * for a single line's spans (used by `decodeJointSequence` when building the state
  * lattice). To avoid exponential blowup the function enforces caps such as
- * `maxUniqueFields`, `maxPhones`, and `maxStates` and optionally restricts
- * enumeration to an initial safe prefix of spans.
+ * `maxUniqueFields`, per-field limits, and `maxStates`.
  *
  * Returns: an array of `JointState` objects (each with a `boundary` and a
  * `fields` array) representing candidate per-line assignments.
+ *
+ * @param spans - candidate spans for a single line
+ * @param schema - field schema defining available fields and constraints
+ * @param opts - optional state space constraints
  */
-export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): JointState[] {
+export function enumerateStates(
+  spans: LineSpans,
+  schema: FieldSchema,
+  opts?: EnumerateOptions
+): JointState[] {
   const states: JointState[] = [];
 
-  const options = {
+  const enumerateOpts = {
     maxUniqueFields: opts?.maxUniqueFields ?? 3,
-    maxPhones: opts?.maxPhones ?? 3,
-    maxEmails: opts?.maxEmails ?? 3,
+    maxStatesPerField: opts?.maxStatesPerField ?? {},
     safePrefix: opts?.safePrefix ?? 8,
     maxStates: opts?.maxStates ?? 2048
   };
 
-  const fieldLabels: string[] = ['ExtID', 'Name', 'PreferredName', 'Phone', 'Email', 'GeneralNotes', 'MedicalNotes', 'DietaryNotes', 'Birthdate', 'NOISE'];
+  // Build field list from schema (excluding NOISE)
+  const fieldLabels = schema.fields.map(f => f.name);
+  const noiseLabel = schema.noiseLabel;
 
-  const repeatable = new Set(['Name', 'Phone', 'Email']);
+  // Build repeatability set and per-field limits from schema
+  const repeatable = new Set<FieldLabel>();
+  const fieldMaxAllowed = new Map<FieldLabel, number>();
+
+  for (const field of schema.fields) {
+    const maxAllowed = field.maxAllowed ?? 1;
+    fieldMaxAllowed.set(field.name, maxAllowed);
+    if (maxAllowed > 1) {
+      repeatable.add(field.name);
+    }
+  }
 
   // To avoid exponential blowup, only enumerate over an initial prefix when the span count is large.
-  const SAFE_PREFIX = options.safePrefix;
+  const SAFE_PREFIX = enumerateOpts.safePrefix;
   const prefixLen = Math.min(spans.spans.length, SAFE_PREFIX);
 
   function countOccurrences(acc: string[], label: string) {
@@ -71,7 +89,7 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
   }
 
   function distinctNonNoiseCount(acc: string[]) {
-    return new Set(acc.filter(x => x !== 'NOISE')).size;
+    return new Set(acc.filter(x => x !== noiseLabel)).size;
   }
 
   /**
@@ -83,46 +101,53 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
    */
   function backtrack(i: number, acc: string[]) {
     // Global safety check: stop if we've reached the cap
-    if (states.length >= options.maxStates) return;
+    if (states.length >= enumerateOpts.maxStates) return;
 
     if (i === prefixLen) {
       // if we limited to a prefix, fill remaining positions with NOISE
-      const tail = spans.spans.slice(prefixLen).map(() => 'NOISE' as const);
+      const tail = spans.spans.slice(prefixLen).map(() => noiseLabel);
       // Push states but guard against exceeding the cap
-      if (states.length < options.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
-      if (states.length < options.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
+      if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
+      if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
       return;
     }
 
     for (const f of fieldLabels) {
       // Another quick cap check to avoid unnecessary work
-      if (states.length >= options.maxStates) return;
+      if (states.length >= enumerateOpts.maxStates) return;
 
       const nonNoiseCount = distinctNonNoiseCount(acc);
 
       // Enforce uniqueness for single-occurrence labels
-      if (f !== 'NOISE' && !repeatable.has(f) && acc.includes(f)) continue;
+      if (f !== noiseLabel && !repeatable.has(f) && acc.includes(f)) continue;
 
       // Enforce max unique fields
-      if (f !== 'NOISE' && !acc.includes(f) && nonNoiseCount >= options.maxUniqueFields) continue;
+      if (f !== noiseLabel && !acc.includes(f) && nonNoiseCount >= enumerateOpts.maxUniqueFields) continue;
 
-      // Enforce per-label caps for repeatables
-      if (f === 'Phone' && countOccurrences(acc, 'Phone') >= options.maxPhones) continue;
-      if (f === 'Email' && countOccurrences(acc, 'Email') >= options.maxEmails) continue;
+      // Enforce per-label caps using schema maxAllowed
+      const fieldLimit = enumerateOpts.maxStatesPerField[f] ?? (fieldMaxAllowed.get(f) ?? 1);
+      if (f !== noiseLabel && countOccurrences(acc, f) >= fieldLimit) continue;
 
       acc.push(f);
       backtrack(i + 1, acc);
       acc.pop();
 
       // Safety: if we've generated a large number of states, bail out early.
-      if (states.length >= options.maxStates) return;
+      if (states.length >= enumerateOpts.maxStates) return;
+    }
+
+    // Also always include NOISE as an option
+    if (states.length < enumerateOpts.maxStates) {
+      acc.push(noiseLabel);
+      backtrack(i + 1, acc);
+      acc.pop();
     }
   }
 
   backtrack(0, []);
 
   // Enforce strict cap just in case generation slightly exceeded the threshold
-  if (states.length > options.maxStates) states.length = options.maxStates;
+  if (states.length > enumerateOpts.maxStates) states.length = enumerateOpts.maxStates;
 
   return states;
 }
@@ -132,7 +157,7 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
  *
  * Intent: simultaneously infer per-line boundary codes (`B` / `C`) and the
  * per-span field label assignments by building a dynamic programming lattice
- * over enumerated per-line state spaces (produced by `enumerateStates`).
+ * over enumerated per-line state spaces.
  *
  * Behavior:
  * - Precomputes boundary and segment feature contributions and emission scores
@@ -141,13 +166,21 @@ export function enumerateStates(spans: LineSpans, opts?: EnumerateOptions): Join
  *
  * Returns: the best-scoring `JointSequence` (one entry per input line).
  */
-export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], featureWeights: Record<string, number>, enumerateOpts?: EnumerateOptions): JointSequence {
+export function decodeJointSequence(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  featureWeights: Record<string, number>,
+  schema: FieldSchema,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  enumerateOpts?: EnumerateOptions
+): JointSequence {
   const lattice: VCell[][] = [];
   const stateSpaces: JointState[][] = [];
 
   // Precompute state spaces
   for (const spans of spansPerLine) {
-    stateSpaces.push(enumerateStates(spans, enumerateOpts));
+    stateSpaces.push(enumerateStates(spans, schema, enumerateOpts));
   }
 
   // Precompute boundary feature contributions (per-line) and per-span segment feature caches to avoid repeated expensive computations
@@ -161,7 +194,7 @@ export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], 
 
     // boundary features base
     let bsum = 0;
-    for (const f of boundaryFeatures) {
+    for (const f of boundaryFeaturesArg) {
       const v = f.apply(ctxBase);
       const w = featureWeights[f.id] ?? 0;
       bsum += w * v;
@@ -179,7 +212,7 @@ export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], 
       const sctx: FeatureContext = { lineIndex: t, lines, candidateSpan: { lineIndex: t, start: span.start, end: span.end } };
       const featsRec: Record<string, number> = {};
 
-      for (const f of segmentFeatures) {
+      for (const f of segmentFeaturesArg) {
         featsRec[f.id] = f.apply(sctx);
       }
 
@@ -217,12 +250,12 @@ export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], 
         
         // Whitespace-only spans should always be NOISE - heavily penalize non-NOISE labels
         const isWhitespace = /^\s*$/.test(txt);
-        if (isWhitespace && label !== 'NOISE') {
+        if (isWhitespace && label !== schema.noiseLabel) {
           fcontrib -= 100; // Large penalty for labeling whitespace as non-NOISE
           continue;
         }
         
-        if (label === 'NOISE') continue;
+        if (label === schema.noiseLabel) continue;
         const featsRec: Record<string, number> = spanFeatureCache[t]?.[k] ?? {};
         const exact10or11: boolean = spanExact10or11[t]?.[k] ?? false;
 
@@ -230,6 +263,7 @@ export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], 
           const w = featureWeights[fid] ?? 0;
           const v = featsRec[fid] ?? 0;
 
+          // Label-aware scoring: boost when label matches feature signal
           if (fid === 'segment.is_phone') {
             fcontrib += (label === 'Phone') ? w * v : -0.5 * w * v;
           } else if (fid === 'segment.is_email') {
@@ -304,14 +338,21 @@ export function decodeJointSequence(lines: string[], spansPerLine: LineSpans[], 
  *
  * Returns: a sparse map from feature id to numeric contribution.
  */
-export function extractJointFeatureVector(lines: string[], spansPerLine: LineSpans[], jointSeq: JointSequence): Record<string, number> {
+export function extractJointFeatureVector(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  jointSeq: JointSequence,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  schema: FieldSchema
+): Record<string, number> {
   const vec: Record<string, number> = {};
 
   // boundary features (line-level)
   for (let i = 0; i < jointSeq.length; i++) {
     const state = jointSeq[i]!;
     const ctx: FeatureContext = { lineIndex: i, lines };
-    for (const f of boundaryFeatures) {
+    for (const f of boundaryFeaturesArg) {
       const v = f.apply(ctx);
       const contrib = state.boundary === 'B' ? v : -v;
       vec[f.id] = (vec[f.id] ?? 0) + contrib;
@@ -328,7 +369,7 @@ export function extractJointFeatureVector(lines: string[], spansPerLine: LineSpa
       const label = state.fields[si];
       const ctx: FeatureContext = { lineIndex: i, lines, candidateSpan: { lineIndex: i, start: span.start, end: span.end } };
 
-      for (const f of segmentFeatures) {
+      for (const f of segmentFeaturesArg) {
         const v = f.apply(ctx);
         let contrib = v;
 
@@ -370,14 +411,17 @@ export function extractJointFeatureVector(lines: string[], spansPerLine: LineSpa
  * constraints (e.g., Guardians should have a nearby Primary). Returns a new
  * `JointSequence` array with `entityType` set for boundary entries.
  */
-export function annotateEntityTypesInSequence(lines: string[], jointSeq: JointSequence): JointSequence {
-  // Compute per-line feature scores using boundaryFeatures
+export function annotateEntityTypesInSequence(lines: string[], jointSeq: JointSequence, boundaryFeaturesArg?: Feature[]): JointSequence {
+  // Use provided boundary features or fall back to global ones
+  const bFeatures = boundaryFeaturesArg ?? boundaryFeatures;
+  
+  // Compute per-line feature scores using boundary features
   const featuresPerLine: Record<number, Record<string, number>> = {};
 
   for (let i = 0; i < jointSeq.length; i++) {
     const ctx: FeatureContext = { lineIndex: i, lines };
     const feats: Record<string, number> = {};
-    for (const f of boundaryFeatures) {
+    for (const f of bFeatures) {
       feats[f.id] = f.apply(ctx);
     }
     // Also add quick regex-derived guardian token flag
@@ -488,10 +532,19 @@ export function annotateEntityTypesInSequence(lines: string[], jointSeq: JointSe
  * - spansPerLine: candidate spans for each line
  * - jointSeq: per-line `JointSequence` assignments (may or may not include entityType)
  * - featureWeights: optional weights used to compute softmax confidences per field
+ * - segmentFeaturesArg: segment-level features
+ * - schema: field schema
  *
  * Returns: a `RecordSpan[]` describing the inferred records and their sub-entities.
  */
-export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpans[], jointSeq: JointSequence, featureWeights?: Record<string, number>): RecordSpan[] {
+export function entitiesFromJointSequence(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  jointSeq: JointSequence,
+  featureWeights: Record<string, number> | undefined,
+  segmentFeaturesArg: Feature[],
+  schema: FieldSchema
+): RecordSpan[] {
   // compute line offsets
   const offsets: number[] = [];
   let off = 0;
@@ -514,12 +567,12 @@ export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpa
     
     // Whitespace-only spans should always be NOISE
     const isWhitespace = /^\s*$/.test(txt);
-    if (isWhitespace && label !== 'NOISE') {
+    if (isWhitespace && label !== schema.noiseLabel) {
       return -100; // Large penalty for labeling whitespace as non-NOISE
     }
     
     let score = 0;
-    for (const f of segmentFeatures) {
+    for (const f of segmentFeaturesArg) {
       const v = f.apply(sctx);
       const w = (featureWeights && featureWeights[f.id]) ?? 0;
       // label-aware scoring like in fieldEmissionScore
@@ -586,13 +639,13 @@ export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpa
         let confidence = 0.5; // default to moderate confidence when weights not provided
         if (featureWeights) {
           const labelScores: number[] = [];
-          const labels: FieldLabel[] = ['ExtID','Name','PreferredName','Phone','Email','GeneralNotes','MedicalNotes','DietaryNotes','Birthdate','NOISE'];
-          for (const lab of labels) labelScores.push(scoreLabelForSpan(li, si, lab as FieldLabel));
+          const labels: FieldLabel[] = schema.fields.map(f => f.name).concat(schema.noiseLabel);
+          for (const lab of labels) labelScores.push(scoreLabelForSpan(li, si, lab));
           const max = Math.max(...labelScores);
           const exps = labelScores.map(sv => Math.exp(sv - max));
           const ssum = exps.reduce((a,b) => a+b, 0);
           const probs = exps.map(e => e / ssum);
-          const idx = labels.indexOf(assignedLabel ?? 'NOISE');
+          const idx = labels.indexOf(assignedLabel ?? schema.noiseLabel);
           confidence = probs[idx] ?? 0;
         }
 
@@ -653,6 +706,9 @@ export function entitiesFromJointSequence(lines: string[], spansPerLine: LineSpa
  * - jointSeq: current predicted joint assignment
  * - feedback: user-supplied feedback with entity/field add/remove assertions
  * - weights: mutable feature weight map to be updated in-place
+ * - boundaryFeaturesArg: boundary-level features
+ * - segmentFeaturesArg: segment-level features
+ * - schema: field schema
  * - learningRate: default 1.0
  * - enumerateOpts: optional enumeration constraints passed to the decoder
  * - stabilizationFactor: boost factor for uncorrected spans (default 0.15)
@@ -665,6 +721,9 @@ export function updateWeightsFromUserFeedback(
   jointSeq: JointSequence,
   feedback: Feedback,
   weights: Record<string, number>,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  schema: FieldSchema,
   learningRate = 1.0,
   enumerateOpts?: EnumerateOptions,
   stabilizationFactor = 0.15
@@ -752,10 +811,10 @@ export function updateWeightsFromUserFeedback(
         const predLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[0]) ? (function findMatching(){
           // try to find span with same coords in original joint spans
           const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x=>x.start===sp.start && x.end===sp.end);
-          if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? 'NOISE';
+          if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? schema.noiseLabel;
           // else fallback to NOISE
-          return 'NOISE' as FieldLabel;
-        })() : 'NOISE' as FieldLabel;
+          return schema.noiseLabel as FieldLabel;
+        })() : schema.noiseLabel as FieldLabel;
         fields.push(predLabel);
       }
     }
@@ -764,11 +823,11 @@ export function updateWeightsFromUserFeedback(
   }
 
   // Re-run prediction on the augmented spans
-  const pred = decodeJointSequence(lines, spansCopy, weights, enumerateOpts);
+  const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts);
 
   // extract feature vectors
-  const vGold = extractJointFeatureVector(lines, spansCopy, gold);
-  const vPred = extractJointFeatureVector(lines, spansCopy, pred);
+  const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeaturesArg, segmentFeaturesArg, schema);
+  const vPred = extractJointFeatureVector(lines, spansCopy, pred, boundaryFeaturesArg, segmentFeaturesArg, schema);
 
   // apply scaled update: w += lr * meanConf * (vGold - vPred)
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
@@ -852,13 +911,11 @@ export function updateWeightsFromUserFeedback(
       });
       const jointGold: JointState[] = spansSingle.map((s: LineSpans, idx: number) => {
         if (idx !== li) return { boundary: 'C', fields: [] } as JointState;
-        return { boundary: 'C', fields: [ 'NOISE' ] } as JointState;
+        return { boundary: 'C', fields: [ schema.noiseLabel ] } as JointState;
       });
 
-      const vPredSpan = extractJointFeatureVector(lines, spansSingle, jointPred);
-      const vGoldSpan = extractJointFeatureVector(lines, spansSingle, jointGold);
-
-      // Phone-specific debug removed
+      const vPredSpan = extractJointFeatureVector(lines, spansSingle, jointPred, boundaryFeaturesArg, segmentFeaturesArg, schema);
+      const vGoldSpan = extractJointFeatureVector(lines, spansSingle, jointGold, boundaryFeaturesArg, segmentFeaturesArg, schema);
 
       const keys = new Set<string>([...Object.keys(vPredSpan), ...Object.keys(vGoldSpan)]);
       for (const k of keys) {
@@ -888,14 +945,14 @@ export function updateWeightsFromUserFeedback(
     if (si < 0) return;
 
     // If already predicted as target, nothing to do
-    const currLabel = pred[li] && pred[li]!.fields && pred[li]!.fields[si] ? pred[li]!.fields[si] : 'NOISE';
+    const currLabel = pred[li] && pred[li]!.fields && pred[li]!.fields[si] ? pred[li]!.fields[si] : schema.noiseLabel;
     if (currLabel === targetLabel) return;
 
     // Compute score for target and current label under current weights
     function scoreWithWeights(wts: Record<string, number>, lab: FieldLabel) {
       const sctx: FeatureContext = { lineIndex: li, lines, candidateSpan: { lineIndex: li, start: spansCopy[li]!.spans[si]!.start, end: spansCopy[li]!.spans[si]!.end } };
       let score = 0;
-      for (const ftr of segmentFeatures) {
+      for (const ftr of segmentFeaturesArg) {
         const v = ftr.apply(sctx);
         const w = wts[ftr.id] ?? 0;
         if (ftr.id === 'segment.is_phone') {
@@ -927,9 +984,6 @@ export function updateWeightsFromUserFeedback(
     const scoreTarget = scoreWithWeights(weights, targetLabel);
     const scoreCurr = scoreWithWeights(weights, currLabel as FieldLabel);
 
-    // debug info
-    // console.log(`nudge check for ${featureId} @ line ${li} span ${si}: scoreTarget=${scoreTarget}, scoreCurr=${scoreCurr}, currLabel=${currLabel}`);
-
     if (scoreTarget > scoreCurr) return; // already favored
 
     // numerical slope estimation: increase feature by 1 and see score change
@@ -950,7 +1004,7 @@ export function updateWeightsFromUserFeedback(
       // try to find an alternative feature that actually moves the target vs current gap
       let bestFeat: string | null = null;
       let bestSlope = 0;
-      for (const ftr of segmentFeatures) {
+      for (const ftr of segmentFeaturesArg) {
         const baseF = weights[ftr.id] ?? 0;
         weights[ftr.id] = baseF + 1;
         const sTargetPlus = scoreWithWeights(weights, targetLabel);
@@ -964,7 +1018,6 @@ export function updateWeightsFromUserFeedback(
         const needed = (scoreCurr - scoreTarget + 1e-6) / bestSlope;
         const nud = Math.max(needed, 0.5) * learningRate * meanConf;
         weights[bestFeat] = (weights[bestFeat] ?? 0) + nud;
-        // console.log(`nudged alternative feature ${bestFeat} by ${nud} to favor ${targetLabel}`);
       } else {
         // fallback large nudge on original feature
         weights[featureId] = (weights[featureId] ?? 0) + learningRate * meanConf * 8.0;
@@ -972,7 +1025,7 @@ export function updateWeightsFromUserFeedback(
     }
 
     // re-run prediction on spansCopy to update pred
-    const newPred = decodeJointSequence(lines, spansCopy, weights, enumerateOpts);
+    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts);
     for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
   }
 
@@ -1016,7 +1069,7 @@ export function updateWeightsFromUserFeedback(
         const newLabel = newSpanIdx >= 0 ? newState.fields?.[newSpanIdx] : undefined;
         
         // Only stabilize if labels match and it's not NOISE
-        if (!origLabel || !newLabel || origLabel !== newLabel || origLabel === 'NOISE') continue;
+        if (!origLabel || !newLabel || origLabel !== newLabel || origLabel === schema.noiseLabel) continue;
         
         // Extract feature contributions for this stable span
         const sctx: FeatureContext = { 
@@ -1025,7 +1078,7 @@ export function updateWeightsFromUserFeedback(
           candidateSpan: { lineIndex: li, start: span.start, end: span.end } 
         };
         
-        for (const f of segmentFeatures) {
+        for (const f of segmentFeaturesArg) {
           const v = f.apply(sctx);
           if (v === 0) continue; // Skip features that don't fire
           
@@ -1059,14 +1112,8 @@ export function updateWeightsFromUserFeedback(
         stabilizationCount++;
       }
     }
-    
-    // Optionally log stabilization activity (commented out by default)
-    // if (stabilizationCount > 0) {
-    //   console.log(`Stabilized ${stabilizationCount} uncorrected spans with factor ${stabilizationFactor}`);
-    // }
   }
 
   return { updated: weights, pred };
 }
-
 
