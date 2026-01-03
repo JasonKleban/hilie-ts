@@ -61,6 +61,17 @@ function App() {
     return renderWithSpans(pastedText, records)
   }, [pastedText, records])
 
+  const subEntityTypes = useMemo(() => {
+    if (!records) return new Set<string>()
+    const types = new Set<string>()
+    for (const record of records) {
+      for (const subEntity of record.subEntities) {
+        types.add(subEntity.entityType ?? "??")
+      }
+    }
+    return types
+  }, [records])
+
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
       // Only accept paste if we haven't received text yet
@@ -94,7 +105,41 @@ function App() {
               <div className="rendered-text">{renderedContent}</div>
             </div>
             <div className="right-panel">
-              {/* Future features will go here */}
+              <div className="legend">
+                <h2>Legend</h2>
+                
+                <div className="legend-section">
+                  <h3>Record Spans</h3>
+                  <div className="legend-items">
+                    <div className="legend-item">
+                      <span className="record-span-legend">Record</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="legend-section">
+                  <h3>Sub-Entity Types</h3>
+                  <div className="legend-items">
+                    {Array.from(subEntityTypes).sort().map((type) => (
+                      <div key={type} className="legend-item">
+                        <span className="sub-entity-span-legend">{type}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="legend-section">
+                  <h3>Field Types</h3>
+                  <div className="legend-items">
+                    {householdInfoSchema.fields.map((field) => (
+                      <div key={field.name} className="legend-item">
+                        <span className="field-span-legend">{field.name}</span>
+                        <span className="max-allowed">(max: {field.maxAllowed})</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </>
         )}

@@ -100,6 +100,120 @@
   background-color: #1a1a1a;
 }
 
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.legend h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.2em;
+  color: rgba(255, 255, 255, 0.87);
+}
+
+.legend h3 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.95em;
+  color: rgba(255, 255, 255, 0.7);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.legend-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.legend-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.record-span-legend {
+  border: 3px solid rgba(100, 108, 255, 0.6);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background-color: rgba(100, 108, 255, 0.05);
+  font-size: 0.85em;
+  font-weight: 500;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.sub-entity-span-legend {
+  border: 2px solid rgba(83, 191, 242, 0.5);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background-color: rgba(83, 191, 242, 0.03);
+  font-size: 0.85em;
+  font-weight: 500;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.field-span-legend {
+  border: 1px solid rgba(144, 238, 144, 0.6);
+  border-radius: 4px;
+  padding: 4px 8px;
+  background-color: rgba(144, 238, 144, 0.08);
+  font-size: 0.85em;
+  font-weight: 500;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.max-allowed {
+  font-size: 0.75em;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+
+@media (prefers-color-scheme: light) {
+  .right-panel {
+    background-color: #f5f5f5;
+  }
+
+  .legend h2 {
+    color: #213547;
+  }
+
+  .legend h3 {
+    color: rgba(33, 53, 71, 0.7);
+  }
+
+  .record-span-legend {
+    border-color: rgba(100, 108, 255, 0.7);
+    background-color: rgba(100, 108, 255, 0.08);
+  }
+
+  .sub-entity-span-legend {
+    border-color: rgba(83, 191, 242, 0.7);
+    background-color: rgba(83, 191, 242, 0.08);
+  }
+
+  .field-span-legend {
+    border-color: rgba(34, 177, 76, 0.7);
+    background-color: rgba(34, 177, 76, 0.08);
+  }
+
+  .max-allowed {
+    color: rgba(33, 53, 71, 0.6);
+  }
+}
+
 @media (prefers-color-scheme: light) {
   .app {
     background-color: #ffffff;
@@ -133,10 +247,6 @@
   .field-span {
     border-color: rgba(34, 177, 76, 0.7);
     background-color: rgba(34, 177, 76, 0.08);
-  }
-
-  .right-panel {
-    background-color: #f5f5f5;
   }
 
   .paste-prompt {
