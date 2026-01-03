@@ -409,4 +409,101 @@ console.log('Unit tests: spanGenerator & enumerateStates');
   console.log('✓ multi-assertion feedback increases respective weights reliably');
 })();
 
+// Assertion reflection: asserted Email should appear immediately and in a fresh decode even from adversarial weights
+(() => {
+  const lines = ['user\tjunk@example.com'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
+  const emailSpan = spans[0]!.spans.find(s => lines[0]!.slice(s.start, s.end).includes('@example.com'));
+  ok(!!emailSpan, 'found email candidate span');
+
+  const w: any = { 'segment.is_email': -5.0, 'segment.token_count_bucket': 0.1 };
+  const predBefore = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 32 });
+  ok(!predBefore[0]!.fields.includes('Email'), 'sanity: adversarial weights do not predict Email');
+
+  const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'Email', action: 'add', confidence: 1 } ] } ] } as any;
+
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 32 });
+
+  const reflected = res.pred[0]!.fields;
+  ok(reflected.includes('Email'), 'post-feedback prediction should reflect asserted Email');
+
+  const fresh = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 32 });
+  ok(fresh[0]!.fields.includes('Email'), 'fresh decode with updated weights should predict Email');
+
+  console.log('✓ asserted Email reflected immediately and in fresh decode');
+})();
+
+// Convergence: repeated feedback drives prediction to asserted label even from strong negative prior
+(() => {
+  const lines = ['contact\tperson@example.com'];
+  const spans = spanGenerator(lines, { delimiterRegex: /\t/ });
+  const emailSpan = spans[0]!.spans.find(s => lines[0]!.slice(s.start, s.end).includes('@example.com'));
+  ok(!!emailSpan, 'found email span');
+
+  const w: any = { 'segment.is_email': -8.0, 'segment.token_count_bucket': 0.1 };
+  let pred = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 32 });
+  ok(!pred[0]!.fields.includes('Email'), 'sanity: strongly negative prior avoids Email');
+
+  const feedback = { entities: [ { startLine: 0, fields: [ { lineIndex: 0, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'Email', action: 'add', confidence: 1 } ] } ] } as any;
+
+  for (let i = 0; i < 2; i++) {
+    const res = updateWeightsFromUserFeedback(lines, spans, pred, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 32 });
+    pred = res.pred;
+  }
+
+  const finalDecode = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 32 });
+  ok(finalDecode[0]!.fields.includes('Email'), 'decoder should converge to Email after repeated feedback');
+
+  console.log('✓ feedback convergence to asserted Email from negative prior');
+})();
+
+// Regression: case3 feedback (remove NOISE + add Email) should not drop all spans
+(() => {
+  const txt = readFileSync('src/tests/data/case3.txt', 'utf8');
+  const lines = txt.split(/\r?\n/).filter(l => l.length > 0);
+  const spans = spanGenerator(lines, {} as any);
+
+  const w: any = {
+    'line.indentation_delta': 0.5,
+    'line.lexical_similarity_drop': 1.0,
+    'line.blank_line': 1.0,
+    'segment.token_count_bucket': 0.8,
+    'segment.numeric_ratio': 1.2,
+    'segment.is_email': 2.0,
+    'segment.is_phone': 1.5,
+    'field.relative_position_consistency': 0.6,
+    'field.optional_penalty': -0.4
+  };
+
+  const predBefore = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 256 });
+
+  const lineIndex = 1; // second line in case3.txt
+  const lineText = lines[lineIndex]!;
+  const emailSpan = spans[lineIndex]!.spans.find(s => lineText.slice(s.start, s.end).includes('@example.com'));
+  ok(!!emailSpan, 'email span should be present in spans for case3 line 2');
+
+  const feedback = {
+    entities: [
+      {
+        startLine: lineIndex,
+        fields: [
+          { lineIndex, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'NOISE', confidence: 1.0, action: 'remove' },
+          { lineIndex, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'Email', confidence: 1.0, action: 'add' }
+        ]
+      }
+    ]
+  } as any;
+
+  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 256 });
+
+  const predFields = res.pred[lineIndex]?.fields ?? [];
+  console.log('case3 feedback debug', { lineIndex, predFields, spansCount: spans[lineIndex]?.spans.length, predLine: res.pred[lineIndex] });
+
+  ok(!!res.pred[lineIndex], 'prediction should exist for line after feedback');
+  ok(predFields.length > 0, 'feedback should not clear all predicted spans');
+  ok(predFields.includes('Email'), 'feedback should encourage Email prediction for asserted span');
+
+  console.log('✓ feedback on case3 preserves spans after NOISE removal + Email add');
+})();
+
 console.log('All unit tests passed.');

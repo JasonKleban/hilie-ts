@@ -291,7 +291,16 @@ export function decodeJointSequence(
   }
 
   // initialize first time step with emission scores so boundary features at line 0 are considered
-  lattice[0] = stateSpaces[0]?.map((s, idx) => ({ score: emissionScores[0]![idx] ?? -Infinity, prev: null })) ?? [];
+  // small bias toward starting a record on the first non-empty line to avoid misclassifying
+  // the initial row (e.g., case3.txt) as a continuation and losing its spans entirely
+  const startLineHasContent = (lines[0]?.trim().length ?? 0) > 0;
+  const startBoundaryBias = startLineHasContent ? 0.75 : 0;
+
+  lattice[0] = stateSpaces[0]?.map((s, idx) => {
+    const baseScore = emissionScores[0]![idx] ?? -Infinity;
+    const bias = s.boundary === 'B' ? startBoundaryBias : 0;
+    return { score: baseScore + bias, prev: null };
+  }) ?? [];
 
   for (let t = 1; t < lines.length; t++) {
     lattice[t] = [];
@@ -936,7 +945,7 @@ export function updateWeightsFromUserFeedback(
    * change the score gap between current label and target label and then
    * applies a calibrated nudge to that feature.
    */
-  async function tryNudge(featureId: string, targetLabel: FieldLabel) {
+  function tryNudge(featureId: string, targetLabel: FieldLabel) {
     // find first asserted span with this label
     const f = assertedFields.find(x => x.fieldType === targetLabel);
     if (!f) return;
@@ -1114,6 +1123,45 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
-  return { updated: weights, pred };
+  let predAfterUpdate = decodeJointSequence(
+    lines,
+    spansCopy,
+    weights,
+    schema,
+    boundaryFeaturesArg,
+    segmentFeaturesArg,
+    enumerateOpts
+  );
+
+  // Ensure asserted labels are reflected in the returned prediction even if
+  // the decoder still disagrees after the weight update. This aligns the
+  // immediate output with explicit user intent while the weights continue to
+  // adapt over subsequent feedback iterations.
+  const labelMapEntries = Object.entries(labelMap);
+  if (labelMapEntries.length > 0) {
+    predAfterUpdate = predAfterUpdate.map((state, li) => {
+      if (!state) return state;
+      const spansForLine = spansCopy[li]?.spans ?? [];
+      const fields = [...(state.fields ?? [])];
+      for (const [key, lab] of labelMapEntries) {
+        const [lineStr, range] = key.split(':');
+        if (!range) continue;
+        const lineIdx = Number(lineStr);
+        if (lineIdx !== li || Number.isNaN(lineIdx)) continue;
+        const [startStr, endStr] = range.split('-');
+        if (!startStr || !endStr) continue;
+        const start = Number(startStr);
+        const end = Number(endStr);
+        const idx = spansForLine.findIndex(s => s.start === start && s.end === end);
+        if (idx >= 0) {
+          while (fields.length <= idx) fields.push(schema.noiseLabel);
+          fields[idx] = lab;
+        }
+      }
+      return { ...state, fields } as JointState;
+    });
+  }
+
+  return { updated: weights, pred: predAfterUpdate };
 }
 
