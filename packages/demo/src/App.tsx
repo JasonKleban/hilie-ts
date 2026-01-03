@@ -23,14 +23,26 @@ const jointWeights = {
   'field.optional_penalty': -0.4
 } as Record<string, number>
 
+type HoverState = {
+  type: 'field' | 'subEntity' | 'record' | null
+  value: string | null
+  spanId?: string // Specific span being hovered
+}
+
 function App() {
   const [pastedText, setPastedText] = useState<string | null>(null)
+  const [normalizedText, setNormalizedText] = useState<string | null>(null)
   const [records, setRecords] = useState<RecordSpan[] | null>(null)
+  const [hoverState, setHoverState] = useState<HoverState>({ type: null, value: null })
 
   // Run extraction when text is pasted
   useEffect(() => {
     if (pastedText !== null) {
-      const lines = pastedText.split(/\r?\n/)
+      // Normalize line endings to \n to match library's assumptions
+      const normalized = pastedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      setNormalizedText(normalized)
+      
+      const lines = normalized.split('\n')
       const spansPerLine = spanGenerator(lines)
 
       const jointSeq = decodeJointSequence(
@@ -57,9 +69,9 @@ function App() {
   }, [pastedText])
 
   const renderedContent = useMemo(() => {
-    if (!pastedText || !records) return null
-    return renderWithSpans(pastedText, records)
-  }, [pastedText, records])
+    if (!normalizedText || !records) return null
+    return renderWithSpans(normalizedText, records, hoverState, setHoverState)
+  }, [normalizedText, records, hoverState])
 
   const subEntityTypes = useMemo(() => {
     if (!records) return new Set<string>()
@@ -122,7 +134,15 @@ function App() {
                   <div className="legend-items">
                     {Array.from(subEntityTypes).sort().map((type) => (
                       <div key={type} className="legend-item">
-                        <span className="sub-entity-span-legend">{type}</span>
+                        <span 
+                          className={`sub-entity-span-legend ${
+                            hoverState.type === 'subEntity' && hoverState.value === type ? 'hover-exact' : ''
+                          }`}
+                          onMouseEnter={() => setHoverState({ type: 'subEntity', value: type })}
+                          onMouseLeave={() => setHoverState({ type: null, value: null })}
+                        >
+                          {type}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -133,7 +153,15 @@ function App() {
                   <div className="legend-items">
                     {householdInfoSchema.fields.map((field) => (
                       <div key={field.name} className="legend-item">
-                        <span className="field-span-legend">{field.name}</span>
+                        <span 
+                          className={`field-span-legend ${
+                            hoverState.type === 'field' && hoverState.value === field.name ? 'hover-exact' : ''
+                          }`}
+                          onMouseEnter={() => setHoverState({ type: 'field', value: field.name })}
+                          onMouseLeave={() => setHoverState({ type: null, value: null })}
+                        >
+                          {field.name}
+                        </span>
                         <span className="max-allowed">(max: {field.maxAllowed})</span>
                       </div>
                     ))}
@@ -148,7 +176,12 @@ function App() {
   )
 }
 
-function renderWithSpans(text: string, records: RecordSpan[]): ReactNode {
+function renderWithSpans(
+  text: string, 
+  records: RecordSpan[], 
+  hoverState: HoverState,
+  setHoverState: (state: HoverState) => void
+): ReactNode {
   const elements: ReactNode[] = []
   let lastEnd = 0
 
@@ -163,7 +196,7 @@ function renderWithSpans(text: string, records: RecordSpan[]): ReactNode {
     // Render the record with its nested spans
     elements.push(
       <span key={`record-${record.fileStart}`} className="record-span">
-        {renderSubEntities(text, record.subEntities, record.fileStart)}
+        {renderSubEntities(text, record.subEntities, record.fileStart, record.fileEnd, hoverState, setHoverState)}
       </span>
     )
 
@@ -183,7 +216,10 @@ function renderWithSpans(text: string, records: RecordSpan[]): ReactNode {
 function renderSubEntities(
   text: string,
   subEntities: SubEntitySpan[],
-  recordStart: number
+  recordStart: number,
+  recordEnd: number,
+  hoverState: HoverState,
+  setHoverState: (state: HoverState) => void
 ): ReactNode {
   const elements: ReactNode[] = []
   let lastEnd = recordStart
@@ -196,24 +232,31 @@ function renderSubEntities(
       )
     }
 
+    const spanId = `sub-entity-${subEntity.fileStart}`
+    const isExact = hoverState.type === 'subEntity' && hoverState.spanId === spanId
+    const isSimilar = hoverState.type === 'subEntity' && hoverState.value === subEntity.entityType && !isExact
+
     // Render the sub-entity with its nested fields
     elements.push(
       <span
-        key={`sub-entity-${subEntity.fileStart}`}
-        className="sub-entity-span"
+        key={spanId}
+        className={`sub-entity-span ${isExact ? 'hover-exact' : ''} ${isSimilar ? 'hover-similar' : ''}`}
         data-entity-type={subEntity.entityType}
+        onMouseEnter={() => setHoverState({ type: 'subEntity', value: subEntity.entityType ?? null, spanId })}
+        onMouseLeave={() => setHoverState({ type: null, value: null })}
       >
-        {renderFields(text, subEntity.fields, subEntity.fileStart)}
+        {renderFields(text, subEntity.fields, subEntity.fileStart, subEntity.fileEnd, subEntity.entityType, hoverState, setHoverState)}
       </span>
     )
 
     lastEnd = subEntity.fileEnd + 1
   }
 
-  // Add remaining text within the record
-  const parentEnd = subEntities.length > 0 ? subEntities[subEntities.length - 1]!.fileEnd : recordStart
-  if (lastEnd <= parentEnd) {
-    // This will be handled by the parent context
+  // Add remaining text within the record (after all subEntities)
+  if (lastEnd <= recordEnd) {
+    elements.push(
+      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, recordEnd + 1)}</span>
+    )
   }
 
   return elements
@@ -222,7 +265,11 @@ function renderSubEntities(
 function renderFields(
   text: string,
   fields: FieldSpan[],
-  subEntityStart: number
+  subEntityStart: number,
+  subEntityEnd: number,
+  parentSubEntityType: string | undefined,
+  hoverState: HoverState,
+  setHoverState: (state: HoverState) => void
 ): ReactNode {
   const elements: ReactNode[] = []
   let lastEnd = subEntityStart
@@ -235,19 +282,33 @@ function renderFields(
       )
     }
 
+    const spanId = `field-${field.fileStart}`
+    const isExact = hoverState.type === 'field' && hoverState.spanId === spanId
+    const isSimilar = hoverState.type === 'field' && hoverState.value === field.fieldType && !isExact
+
     // Render the field
     elements.push(
       <span
-        key={`field-${field.fileStart}`}
-        className="field-span"
+        key={spanId}
+        className={`field-span ${isExact ? 'hover-exact' : ''} ${isSimilar ? 'hover-similar' : ''}`}
         data-field-type={field.fieldType}
+        data-parent-subentity={parentSubEntityType}
         title={`${field.fieldType} (${((field.confidence ?? 0) * 100).toFixed(1)}%)`}
+        onMouseEnter={() => setHoverState({ type: 'field', value: field.fieldType ?? null, spanId })}
+        onMouseLeave={() => setHoverState({ type: null, value: null })}
       >
         {text.slice(field.fileStart, field.fileEnd + 1)}
       </span>
     )
 
     lastEnd = field.fileEnd + 1
+  }
+
+  // Add remaining text within the sub-entity (after all fields)
+  if (lastEnd <= subEntityEnd) {
+    elements.push(
+      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, subEntityEnd + 1)}</span>
+    )
   }
 
   return elements

@@ -58,39 +58,64 @@
 
 /* RecordSpan - Largest border, outermost */
 .record-span {
-  border: 3px solid rgba(100, 108, 255, 0.6);
+  border: 3px solid rgba(100, 108, 255, 0.4);
   border-radius: 8px;
   padding: 12px;
   margin: 8px 0;
   display: block;
-  background-color: rgba(100, 108, 255, 0.05);
+  background-color: rgba(100, 108, 255, 0.03);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 
 /* SubEntitySpan - Medium border, middle layer */
 .sub-entity-span {
-  border: 2px solid rgba(83, 191, 242, 0.5);
+  border: 2px solid rgba(83, 191, 242, 0.3);
   border-radius: 6px;
   padding: 8px;
   margin: 6px 0;
   display: inline-block;
-  background-color: rgba(83, 191, 242, 0.03);
+  background-color: rgba(83, 191, 242, 0.02);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sub-entity-span.hover-exact {
+  border-color: rgba(83, 191, 242, 1);
+  background-color: rgba(83, 191, 242, 0.2);
+  box-shadow: 0 0 8px rgba(83, 191, 242, 0.4);
+}
+
+.sub-entity-span.hover-similar {
+  border-color: rgba(83, 191, 242, 0.6);
+  background-color: rgba(83, 191, 242, 0.1);
 }
 
 /* FieldSpan - Smallest border, innermost */
 .field-span {
-  border: 1px solid rgba(144, 238, 144, 0.6);
+  border: 1px solid rgba(144, 238, 144, 0.4);
   border-radius: 4px;
   padding: 4px 6px;
   margin: 2px;
   display: inline-block;
-  background-color: rgba(144, 238, 144, 0.08);
+  background-color: rgba(144, 238, 144, 0.05);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  cursor: help;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.field-span.hover-exact {
+  border-color: rgba(144, 238, 144, 1);
+  background-color: rgba(144, 238, 144, 0.25);
+  box-shadow: 0 0 6px rgba(144, 238, 144, 0.5);
+}
+
+.field-span.hover-similar {
+  border-color: rgba(144, 238, 144, 0.7);
+  background-color: rgba(144, 238, 144, 0.15);
 }
 
 .right-panel {
@@ -140,39 +165,63 @@
 }
 
 .record-span-legend {
-  border: 3px solid rgba(100, 108, 255, 0.6);
+  border: 3px solid rgba(100, 108, 255, 0.4);
   border-radius: 8px;
   padding: 6px 12px;
-  background-color: rgba(100, 108, 255, 0.05);
+  background-color: rgba(100, 108, 255, 0.03);
   font-size: 0.85em;
   font-weight: 500;
   white-space: nowrap;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.record-span-legend.hover-exact {
+  border-color: rgba(100, 108, 255, 1);
+  background-color: rgba(100, 108, 255, 0.2);
+  box-shadow: 0 0 8px rgba(100, 108, 255, 0.4);
 }
 
 .sub-entity-span-legend {
-  border: 2px solid rgba(83, 191, 242, 0.5);
+  border: 2px solid rgba(83, 191, 242, 0.3);
   border-radius: 6px;
   padding: 5px 10px;
-  background-color: rgba(83, 191, 242, 0.03);
+  background-color: rgba(83, 191, 242, 0.02);
   font-size: 0.85em;
   font-weight: 500;
   white-space: nowrap;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sub-entity-span-legend.hover-exact {
+  border-color: rgba(83, 191, 242, 1);
+  background-color: rgba(83, 191, 242, 0.2);
+  box-shadow: 0 0 8px rgba(83, 191, 242, 0.4);
 }
 
 .field-span-legend {
-  border: 1px solid rgba(144, 238, 144, 0.6);
+  border: 1px solid rgba(144, 238, 144, 0.4);
   border-radius: 4px;
   padding: 4px 8px;
-  background-color: rgba(144, 238, 144, 0.08);
+  background-color: rgba(144, 238, 144, 0.05);
   font-size: 0.85em;
   font-weight: 500;
   white-space: nowrap;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.field-span-legend.hover-exact {
+  border-color: rgba(144, 238, 144, 1);
+  background-color: rgba(144, 238, 144, 0.25);
+  box-shadow: 0 0 6px rgba(144, 238, 144, 0.5);
 }
 
 .max-allowed {
@@ -195,18 +244,33 @@
   }
 
   .record-span-legend {
-    border-color: rgba(100, 108, 255, 0.7);
-    background-color: rgba(100, 108, 255, 0.08);
+    border-color: rgba(100, 108, 255, 0.5);
+    background-color: rgba(100, 108, 255, 0.05);
+  }
+
+  .record-span-legend.hover-exact {
+    border-color: rgba(100, 108, 255, 1);
+    background-color: rgba(100, 108, 255, 0.3);
   }
 
   .sub-entity-span-legend {
-    border-color: rgba(83, 191, 242, 0.7);
-    background-color: rgba(83, 191, 242, 0.08);
+    border-color: rgba(83, 191, 242, 0.5);
+    background-color: rgba(83, 191, 242, 0.05);
+  }
+
+  .sub-entity-span-legend.hover-exact {
+    border-color: rgba(83, 191, 242, 1);
+    background-color: rgba(83, 191, 242, 0.3);
   }
 
   .field-span-legend {
-    border-color: rgba(34, 177, 76, 0.7);
-    background-color: rgba(34, 177, 76, 0.08);
+    border-color: rgba(34, 177, 76, 0.5);
+    background-color: rgba(34, 177, 76, 0.05);
+  }
+
+  .field-span-legend.hover-exact {
+    border-color: rgba(34, 177, 76, 1);
+    background-color: rgba(34, 177, 76, 0.3);
   }
 
   .max-allowed {
@@ -235,18 +299,38 @@
   }
 
   .record-span {
-    border-color: rgba(100, 108, 255, 0.7);
-    background-color: rgba(100, 108, 255, 0.08);
+    border-color: rgba(100, 108, 255, 0.5);
+    background-color: rgba(100, 108, 255, 0.05);
   }
 
   .sub-entity-span {
+    border-color: rgba(83, 191, 242, 0.5);
+    background-color: rgba(83, 191, 242, 0.05);
+  }
+
+  .sub-entity-span.hover-exact {
+    border-color: rgba(83, 191, 242, 1);
+    background-color: rgba(83, 191, 242, 0.3);
+  }
+
+  .sub-entity-span.hover-similar {
     border-color: rgba(83, 191, 242, 0.7);
-    background-color: rgba(83, 191, 242, 0.08);
+    background-color: rgba(83, 191, 242, 0.15);
   }
 
   .field-span {
+    border-color: rgba(34, 177, 76, 0.5);
+    background-color: rgba(34, 177, 76, 0.05);
+  }
+
+  .field-span.hover-exact {
+    border-color: rgba(34, 177, 76, 1);
+    background-color: rgba(34, 177, 76, 0.3);
+  }
+
+  .field-span.hover-similar {
     border-color: rgba(34, 177, 76, 0.7);
-    background-color: rgba(34, 177, 76, 0.08);
+    background-color: rgba(34, 177, 76, 0.15);
   }
 
   .paste-prompt {
