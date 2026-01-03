@@ -4,6 +4,7 @@ import {
   entitiesFromJointSequence,
   spanGenerator,
   updateWeightsFromUserFeedback,
+  type JointSequence,
   type RecordSpan,
   type SubEntitySpan,
   type FieldSpan,
@@ -38,6 +39,7 @@ function App() {
   const [normalizedText, setNormalizedText] = useState<string | null>(null)
   const [lines, setLines] = useState<string[]>([])
   const [spansPerLine, setSpansPerLine] = useState<LineSpans[]>([])
+  const [jointSeq, setJointSeq] = useState<JointSequence | null>(null)
   const [weights, setWeights] = useState<Record<string, number>>(initialWeights)
   const [feedbackHistory, setFeedbackHistory] = useState<FieldAssertion[]>([])
   const [records, setRecords] = useState<RecordSpan[] | null>(null)
@@ -70,6 +72,7 @@ function App() {
             segmentFeatures,
             { maxStates: 512, safePrefix: 6 }
           )
+          setJointSeq(jointSeq)
 
           const extractedRecords = entitiesFromJointSequence(
             linesArray,
@@ -124,6 +127,7 @@ function App() {
 
   const handleFieldFeedback = (fieldType: string) => {
     if (!textSelection || !normalizedText || !records) return
+    if (!jointSeq) return
 
     const { start, end } = textSelection
 
@@ -221,7 +225,7 @@ function App() {
         const { updated: newWeights } = updateWeightsFromUserFeedback(
           lines,
           spansPerLine,
-          records.flatMap(r => r.subEntities.flatMap(s => ({ boundary: 'C' as const, fields: s.fields.map(f => f.fieldType ?? 'NOISE') }))),
+          jointSeq,
           feedback,
           { ...weights },
           boundaryFeatures,
