@@ -43,39 +43,48 @@ function App() {
   const [records, setRecords] = useState<RecordSpan[] | null>(null)
   const [hoverState, setHoverState] = useState<HoverState>({ type: null, value: null })
   const [textSelection, setTextSelection] = useState<{ start: number; end: number } | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
 
   // Run extraction when text is pasted or weights change
   useEffect(() => {
     if (pastedText !== null) {
-      // Normalize line endings to \n to match library's assumptions
-      const normalized = pastedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-      setNormalizedText(normalized)
-      
-      const linesArray = normalized.split('\n')
-      setLines(linesArray)
-      const spans = spanGenerator(linesArray)
-      setSpansPerLine(spans)
+      setIsLoading(true)
+      // Use setTimeout to allow loading indicator to render
+      setTimeout(() => {
+        try {
+          // Normalize line endings to \n to match library's assumptions
+          const normalized = pastedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+          setNormalizedText(normalized)
+          
+          const linesArray = normalized.split('\n')
+          setLines(linesArray)
+          const spans = spanGenerator(linesArray)
+          setSpansPerLine(spans)
 
-      const jointSeq = decodeJointSequence(
-        linesArray,
-        spans,
-        weights,
-        householdInfoSchema,
-        boundaryFeatures,
-        segmentFeatures,
-        { maxStates: 512, safePrefix: 6 }
-      )
+          const jointSeq = decodeJointSequence(
+            linesArray,
+            spans,
+            weights,
+            householdInfoSchema,
+            boundaryFeatures,
+            segmentFeatures,
+            { maxStates: 512, safePrefix: 6 }
+          )
 
-      const extractedRecords = entitiesFromJointSequence(
-        linesArray,
-        spans,
-        jointSeq,
-        weights,
-        segmentFeatures,
-        householdInfoSchema
-      )
+          const extractedRecords = entitiesFromJointSequence(
+            linesArray,
+            spans,
+            jointSeq,
+            weights,
+            segmentFeatures,
+            householdInfoSchema
+          )
 
-      setRecords(extractedRecords)
+          setRecords(extractedRecords)
+        } finally {
+          setIsLoading(false)
+        }
+      }, 0)
     }
   }, [pastedText, weights])
 
@@ -198,27 +207,35 @@ function App() {
     // Log the updated feedback history
     console.log('Updated feedback history:', JSON.stringify(updatedHistory, null, 2))
 
-    // Apply feedback to update weights
-    const feedback: Feedback = {
-      entities: [{
-        fields: updatedHistory
-      }]
-    }
+    setIsLoading(true)
+    // Use setTimeout to allow loading indicator to render
+    setTimeout(() => {
+      try {
+        // Apply feedback to update weights
+        const feedback: Feedback = {
+          entities: [{
+            fields: updatedHistory
+          }]
+        }
 
-    const { updated: newWeights } = updateWeightsFromUserFeedback(
-      lines,
-      spansPerLine,
-      records.flatMap(r => r.subEntities.flatMap(s => ({ boundary: 'C' as const, fields: s.fields.map(f => f.fieldType ?? 'NOISE') }))),
-      feedback,
-      { ...weights },
-      boundaryFeatures,
-      segmentFeatures,
-      householdInfoSchema
-    )
+        const { updated: newWeights } = updateWeightsFromUserFeedback(
+          lines,
+          spansPerLine,
+          records.flatMap(r => r.subEntities.flatMap(s => ({ boundary: 'C' as const, fields: s.fields.map(f => f.fieldType ?? 'NOISE') }))),
+          feedback,
+          { ...weights },
+          boundaryFeatures,
+          segmentFeatures,
+          householdInfoSchema
+        )
 
-    setWeights(newWeights)
-    setTextSelection(null) // Clear selection after applying
-    window.getSelection()?.removeAllRanges()
+        setWeights(newWeights)
+      } finally {
+        setIsLoading(false)
+        setTextSelection(null) // Clear selection after applying
+        window.getSelection()?.removeAllRanges()
+      }
+    }, 0)
   }
 
   const renderedContent = useMemo(() => {
@@ -255,6 +272,7 @@ function App() {
 
   return (
     <div className="app">
+      <div className={`progress-indicator ${isLoading ? 'active' : ''}`}></div>
       <div className="header">
         <h1>Hilie Interactive Demo</h1>
       </div>
@@ -310,7 +328,10 @@ function App() {
                           className={`field-span-legend ${
                             hoverState.type === 'field' && hoverState.value === field.name ? 'hover-exact' : ''
                           }`}
-                          onClick={() => handleFieldFeedback(field.name)}
+                          onMouseDown={(e) => {
+                            e.preventDefault()
+                            handleFieldFeedback(field.name)
+                          }}
                           onMouseEnter={() => setHoverState({ type: 'field', value: field.name })}
                           onMouseLeave={() => setHoverState({ type: null, value: null })}
                         >
