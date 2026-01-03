@@ -3,15 +3,19 @@ import {
   decodeJointSequence,
   entitiesFromJointSequence,
   spanGenerator,
+  updateWeightsFromUserFeedback,
   type RecordSpan,
   type SubEntitySpan,
-  type FieldSpan
+  type FieldSpan,
+  type Feedback,
+  type FieldAssertion,
+  type LineSpans
 } from 'hilie'
 import { boundaryFeatures, segmentFeatures } from 'hilie'
 import './App.css'
 import { householdInfoSchema } from './schema'
 
-const jointWeights = {
+const initialWeights = {
   'line.indentation_delta': 0.5,
   'line.lexical_similarity_drop': 1.0,
   'line.blank_line': 1.0,
@@ -32,23 +36,30 @@ type HoverState = {
 function App() {
   const [pastedText, setPastedText] = useState<string | null>(null)
   const [normalizedText, setNormalizedText] = useState<string | null>(null)
+  const [lines, setLines] = useState<string[]>([])
+  const [spansPerLine, setSpansPerLine] = useState<LineSpans[]>([])
+  const [weights, setWeights] = useState<Record<string, number>>(initialWeights)
+  const [feedbackHistory, setFeedbackHistory] = useState<FieldAssertion[]>([])
   const [records, setRecords] = useState<RecordSpan[] | null>(null)
   const [hoverState, setHoverState] = useState<HoverState>({ type: null, value: null })
+  const [textSelection, setTextSelection] = useState<{ start: number; end: number } | null>(null)
 
-  // Run extraction when text is pasted
+  // Run extraction when text is pasted or weights change
   useEffect(() => {
     if (pastedText !== null) {
       // Normalize line endings to \n to match library's assumptions
       const normalized = pastedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       setNormalizedText(normalized)
       
-      const lines = normalized.split('\n')
-      const spansPerLine = spanGenerator(lines)
+      const linesArray = normalized.split('\n')
+      setLines(linesArray)
+      const spans = spanGenerator(linesArray)
+      setSpansPerLine(spans)
 
       const jointSeq = decodeJointSequence(
-        lines,
-        spansPerLine,
-        jointWeights,
+        linesArray,
+        spans,
+        weights,
         householdInfoSchema,
         boundaryFeatures,
         segmentFeatures,
@@ -56,17 +67,159 @@ function App() {
       )
 
       const extractedRecords = entitiesFromJointSequence(
-        lines,
-        spansPerLine,
+        linesArray,
+        spans,
         jointSeq,
-        jointWeights,
+        weights,
         segmentFeatures,
         householdInfoSchema
       )
 
       setRecords(extractedRecords)
     }
-  }, [pastedText])
+  }, [pastedText, weights])
+
+  // Handle text selection
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0 || !normalizedText) return
+
+      const range = selection.getRangeAt(0)
+      const textDisplay = document.querySelector('.text-display')
+      
+      if (!textDisplay || !textDisplay.contains(range.commonAncestorContainer)) {
+        setTextSelection(null)
+        return
+      }
+
+      // Get selected text and compute character offsets
+      const selectedText = selection.toString()
+      if (selectedText.length === 0) {
+        setTextSelection(null)
+        return
+      }
+
+      // Find the start offset in the normalized text
+      const preCaretRange = range.cloneRange()
+      preCaretRange.selectNodeContents(textDisplay)
+      preCaretRange.setEnd(range.startContainer, range.startOffset)
+      const start = preCaretRange.toString().length
+
+      setTextSelection({ start, end: start + selectedText.length })
+    }
+
+    document.addEventListener('selectionchange', handleSelectionChange)
+    return () => document.removeEventListener('selectionchange', handleSelectionChange)
+  }, [normalizedText])
+
+  const handleFieldFeedback = (fieldType: string) => {
+    if (!textSelection || !normalizedText || !records) return
+
+    const { start, end } = textSelection
+
+    // Find which line(s) this selection spans
+    let charCount = 0
+    let startLine = -1
+    let startOffset = 0
+    let endLine = -1
+    let endOffset = 0
+
+    for (let i = 0; i < lines.length; i++) {
+      const lineLen = lines[i]!.length
+      
+      if (startLine === -1 && charCount + lineLen >= start) {
+        startLine = i
+        startOffset = start - charCount
+      }
+      
+      if (charCount + lineLen >= end - 1) {
+        endLine = i
+        endOffset = end - charCount - 1
+        break
+      }
+      
+      charCount += lineLen + 1 // +1 for newline
+    }
+
+    if (startLine === -1 || endLine === -1) return
+
+    // For simplicity, only handle single-line selections for now
+    if (startLine !== endLine) {
+      alert('Multi-line selections are not yet supported')
+      return
+    }
+
+    const newFeedback: FieldAssertion = {
+      action: 'add',
+      lineIndex: startLine,
+      start: startOffset,
+      end: endOffset,
+      fieldType,
+      confidence: 1.0
+    }
+
+    // Remove conflicting feedback (same or overlapping span on same line)
+    const filteredHistory = feedbackHistory.filter(f => {
+      if (f.lineIndex !== startLine) return true
+      // Check for overlap
+      const fStart = f.start ?? 0
+      const fEnd = f.end ?? 0
+      return !(fStart < endOffset && fEnd > startOffset)
+    })
+
+    // Find spans that conflict with the new selection and mark them for removal
+    const conflictingSpans: FieldAssertion[] = []
+    if (records) {
+      for (const record of records) {
+        for (const subEntity of record.subEntities) {
+          for (const field of subEntity.fields) {
+            if (field.lineIndex === startLine) {
+              // Check if this field overlaps with our selection
+              if (field.start < endOffset && field.end > startOffset) {
+                conflictingSpans.push({
+                  action: 'remove',
+                  lineIndex: startLine,
+                  start: field.start,
+                  end: field.end,
+                  fieldType: field.fieldType,
+                  confidence: 1.0
+                })
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const updatedHistory = [...filteredHistory, ...conflictingSpans, newFeedback]
+    setFeedbackHistory(updatedHistory)
+
+    // Log the updated feedback history
+    console.log('Updated feedback history:', JSON.stringify(updatedHistory, null, 2))
+
+    // Apply feedback to update weights
+    const feedback: Feedback = {
+      entities: [{
+        fields: updatedHistory
+      }]
+    }
+
+    const { updated: newWeights } = updateWeightsFromUserFeedback(
+      lines,
+      spansPerLine,
+      records.flatMap(r => r.subEntities.flatMap(s => ({ boundary: 'C' as const, fields: s.fields.map(f => f.fieldType ?? 'NOISE') }))),
+      feedback,
+      { ...weights },
+      boundaryFeatures,
+      segmentFeatures,
+      householdInfoSchema
+    )
+
+    setWeights(newWeights)
+    setTextSelection(null) // Clear selection after applying
+    window.getSelection()?.removeAllRanges()
+  }
 
   const renderedContent = useMemo(() => {
     if (!normalizedText || !records) return null
@@ -157,6 +310,7 @@ function App() {
                           className={`field-span-legend ${
                             hoverState.type === 'field' && hoverState.value === field.name ? 'hover-exact' : ''
                           }`}
+                          onClick={() => handleFieldFeedback(field.name)}
                           onMouseEnter={() => setHoverState({ type: 'field', value: field.name })}
                           onMouseLeave={() => setHoverState({ type: null, value: null })}
                         >
@@ -200,7 +354,7 @@ function renderWithSpans(
       </span>
     )
 
-    lastEnd = record.fileEnd + 1
+    lastEnd = record.fileEnd
   }
 
   // Add remaining text
@@ -249,13 +403,13 @@ function renderSubEntities(
       </span>
     )
 
-    lastEnd = subEntity.fileEnd + 1
+    lastEnd = subEntity.fileEnd
   }
 
   // Add remaining text within the record (after all subEntities)
-  if (lastEnd <= recordEnd) {
+  if (lastEnd < recordEnd) {
     elements.push(
-      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, recordEnd + 1)}</span>
+      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, recordEnd)}</span>
     )
   }
 
@@ -297,17 +451,17 @@ function renderFields(
         onMouseEnter={() => setHoverState({ type: 'field', value: field.fieldType ?? null, spanId })}
         onMouseLeave={() => setHoverState({ type: null, value: null })}
       >
-        {text.slice(field.fileStart, field.fileEnd + 1)}
+        {text.slice(field.fileStart, field.fileEnd)}
       </span>
     )
 
-    lastEnd = field.fileEnd + 1
+    lastEnd = field.fileEnd
   }
 
   // Add remaining text within the sub-entity (after all fields)
-  if (lastEnd <= subEntityEnd) {
+  if (lastEnd < subEntityEnd) {
     elements.push(
-      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, subEntityEnd + 1)}</span>
+      <span key={`text-${lastEnd}`}>{text.slice(lastEnd, subEntityEnd)}</span>
     )
   }
 

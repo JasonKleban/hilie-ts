@@ -1,5 +1,5 @@
 // Curated public API
-export type { FieldSchema, Feature, FeatureContext, JointState, JointSequence, LineSpans, FieldSpan, Feedback, TransitionWeights, BoundaryState, RecordSpan, SubEntitySpan } from './lib/types.js';
+export type { FieldSchema, Feature, FeatureContext, JointState, JointSequence, LineSpans, FieldSpan, Feedback, FieldAssertion, EntityAssertion, TransitionWeights, BoundaryState, RecordSpan, SubEntitySpan } from './lib/types.js';
 export { defaultTransitions } from './lib/types.js';
 export {
   decodeJointSequence,
