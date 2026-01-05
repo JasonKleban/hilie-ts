@@ -177,16 +177,51 @@ export interface FieldAssertion extends Partial<FieldSpan> {
   confidence?: number;
 }
 
-export interface EntityAssertion {
-  startLine?: number;
-  endLine?: number;
+// Record-level assertion (top-level container). startLine and endLine are required.
+export interface RecordAssertion {
+  startLine: number;
+  endLine: number;
   fileStart?: number;
   fileEnd?: number;
+  // attached field assertions for convenience
+  fields?: FieldAssertion[];
+}
+
+// Sub-entity assertion (Primary/Guardian) within a Record
+export interface SubEntityAssertion {
+  startLine: number;
+  endLine: number;
   entityType?: EntityType;
   fields?: FieldAssertion[];
 }
 
+// Backwards-compatibility alias: an EntityAssertion can be either a Record or a SubEntity
+export type EntityAssertion = RecordAssertion | SubEntityAssertion;
+
 export interface Feedback {
-  // list of asserted entity-level edits
-  entities: EntityAssertion[];
+  // Preferred shape: chronologically ordered feedback entries (newest last).
+  entries?: FeedbackEntry[];
+
+  // Prefer explicit properties: records (top-level) and subEntities (Primary/Guardian)
+  records?: RecordAssertion[];
+  subEntities?: SubEntityAssertion[];
+  // legacy property for backward-compatibility
+  entities?: RecordAssertion[];
 }
+
+export type FeedbackEntry =
+  | {
+      kind: 'record';
+      startLine: number;
+      endLine: number;
+    }
+  | {
+      kind: 'subEntity';
+      startLine: number;
+      endLine: number;
+      entityType: EntityType;
+    }
+  | {
+      kind: 'field';
+      field: FieldAssertion;
+    };

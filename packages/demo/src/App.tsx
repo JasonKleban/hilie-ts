@@ -1,20 +1,18 @@
 import { useState, useEffect, useMemo, type ReactNode } from 'react'
 import {
   decodeJointSequence,
+  decodeJointSequenceWithFeedback,
   entitiesFromJointSequence,
   spanGenerator,
   updateWeightsFromUserFeedback,
-  buildFeedbackFromHistories,
-  removeEntityConflicts as removeEntityConflictsLib,
   type JointSequence,
   type RecordSpan,
   type SubEntitySpan,
   type FieldSpan,
-  type Feedback,
   type FieldAssertion,
   type LineSpans,
-  type EntityAssertion,
-  type EntityType
+  type EntityType,
+  type FeedbackEntry
 } from 'hilie'
 import { boundaryFeatures, segmentFeatures } from 'hilie'
 import './App.css'
@@ -45,54 +43,64 @@ function App() {
   const [spansPerLine, setSpansPerLine] = useState<LineSpans[]>([])
   const [jointSeq, setJointSeq] = useState<JointSequence | null>(null)
   const [weights, setWeights] = useState<Record<string, number>>(initialWeights)
-  const [feedbackHistory, setFeedbackHistory] = useState<FieldAssertion[]>([])
+  const [feedbackEntries, setFeedbackEntries] = useState<FeedbackEntry[]>([])
   const [records, setRecords] = useState<RecordSpan[] | null>(null)
   const [hoverState, setHoverState] = useState<HoverState>({ type: null, value: null })
   const [textSelection, setTextSelection] = useState<{ start: number; end: number } | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [boundaryCorrections, setBoundaryCorrections] = useState<Set<number>>(new Set())
   const [suppressExtractionOnWeightChange, setSuppressExtractionOnWeightChange] = useState(false)
   const [selectedSubEntityType, setSelectedSubEntityType] = useState<string | null>(null)
-  // Track entity-level feedback (records / sub-entity assertions) for UI and submission
-  const [entityFeedbackHistory, setEntityFeedbackHistory] = useState<EntityAssertion[]>([])
 
-  // Build a normalized Feedback object from the UI histories
-  // Use library helper to build canonical Feedback from UI histories
-  // (delegates deduplication, boundary seeding, and field attachment)
-  const buildFeedback = (
-    entityHist = entityFeedbackHistory,
-    fieldHist = feedbackHistory,
-    boundarySet = boundaryCorrections
-  ): Feedback => {
-    return buildFeedbackFromHistories(entityHist, fieldHist, boundarySet)
-  }
+  const clearFeedbackKeepWeights = () => {
+    // Clearing feedback should remove hard constraints but preserve learned weights.
+    setFeedbackEntries([])
+    setSelectedSubEntityType(null)
 
-  // Remove entity and field conflicts when adding a new entity/sub-entity record
-  // Delegate conflict removal to library helper
-  const removeEntityConflicts = (newStart: number, newEnd?: number) => {
-    return removeEntityConflictsLib(entityFeedbackHistory, feedbackHistory, boundaryCorrections, newStart, newEnd)
-  }
-
-  // Submit a unified feedback object to the library and update weights
-  const submitUnifiedFeedback = (
-    entityHist?: EntityAssertion[],
-    fieldHist?: FieldAssertion[],
-    boundarySet?: Set<number>
-  ) => {
-    const entH = entityHist ?? entityFeedbackHistory
-    const fH = fieldHist ?? feedbackHistory
-    const bS = boundarySet ?? boundaryCorrections
-
-    const feedback = buildFeedback(entH, fH, bS)
-
-    // Always log the unified feedback that will be submitted to the library
-    // (helps validate that entityType assertions are present)
-    // eslint-disable-next-line no-console
-    console.log('Unified feedback to submit:', JSON.stringify(feedback, null, 2))
+    if (!lines.length) return
 
     setIsLoading(true)
-    // Suppress the normal re-extraction that runs on weight changes once so the
-    // feedback-provided `spansPerLine` survives the immediate weight update.
+    setTimeout(() => {
+      try {
+        const spans = spanGenerator(lines)
+        setSpansPerLine(spans)
+
+        const decodeOpts = { maxStates: 512, safePrefix: 6 }
+        const pred = decodeJointSequence(
+          lines,
+          spans,
+          weights,
+          householdInfoSchema,
+          boundaryFeatures,
+          segmentFeatures,
+          decodeOpts
+        )
+        setJointSeq(pred)
+
+        const extractedRecords = entitiesFromJointSequence(
+          lines,
+          spans,
+          pred,
+          weights,
+          segmentFeatures,
+          householdInfoSchema
+        )
+        setRecords(extractedRecords)
+      } finally {
+        setIsLoading(false)
+        setTextSelection(null)
+        window.getSelection()?.removeAllRanges()
+      }
+    }, 0)
+  }
+
+  // Submit ordered feedback entries (newest last). The library handles normalization/conflicts.
+  const submitUnifiedFeedback = (entries?: FeedbackEntry[]) => {
+    const fb = { entries: entries ?? feedbackEntries }
+
+    // eslint-disable-next-line no-console
+    console.log('Unified feedback to submit:', JSON.stringify(fb, null, 2))
+
+    setIsLoading(true)
     setSuppressExtractionOnWeightChange(true)
     setTimeout(() => {
       try {
@@ -100,21 +108,19 @@ function App() {
           lines,
           spansPerLine,
           jointSeq!,
-          feedback,
+          fb,
           { ...weights },
           boundaryFeatures,
           segmentFeatures,
           householdInfoSchema
         )
 
-        // Apply returned weights, prediction and (if provided) modified spans so UI reflects the feedback immediately
         setWeights(newWeights)
         if (newPred) {
           setJointSeq(newPred)
           const spansToUse = newSpans ?? spansPerLine
           setSpansPerLine(spansToUse)
 
-          // Recompute records from the returned prediction using the same features/weights
           const extractedRecords = entitiesFromJointSequence(
             lines,
             spansToUse,
@@ -162,51 +168,6 @@ function App() {
     return lo
   }
 
-  // Helper: apply recorded field-level feedback to a freshly generated spans array
-  const applyFeedbackToSpans = (spans: LineSpans[]) => {
-    const spansCopy: LineSpans[] = spans.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }))
-
-    for (const f of feedbackHistory) {
-      const li = f.lineIndex
-      if (li === undefined || li === null) continue
-      spansCopy[li] = spansCopy[li] ?? { lineIndex: li, spans: [] }
-      if (f.action === 'remove') {
-        const idx = spansCopy[li]!.spans.findIndex(x => x.start === f.start && x.end === f.end)
-        if (idx >= 0) spansCopy[li]!.spans.splice(idx, 1)
-      } else {
-        const idx = spansCopy[li]!.spans.findIndex(x => x.start === f.start && x.end === f.end)
-        if (idx < 0) {
-          spansCopy[li]!.spans.push({ start: f.start ?? 0, end: f.end ?? 0 })
-          spansCopy[li]!.spans.sort((a, b) => a.start - b.start)
-        }
-      }
-    }
-
-    // Also apply any entity-level field assertions recorded on entities
-    for (const ent of entityFeedbackHistory) {
-      if (!ent.fields || !ent.fields.length) continue
-      for (const f of ent.fields) {
-        const li = f.lineIndex ?? ent.startLine
-        if (li === undefined || li === null) continue
-        spansCopy[li] = spansCopy[li] ?? { lineIndex: li, spans: [] }
-        if (f.action === 'remove') {
-          const idx = spansCopy[li]!.spans.findIndex(x => x.start === f.start && x.end === f.end)
-          if (idx >= 0) spansCopy[li]!.spans.splice(idx, 1)
-        } else {
-          const idx = spansCopy[li]!.spans.findIndex(x => x.start === f.start && x.end === f.end)
-          if (idx < 0) {
-            spansCopy[li]!.spans.push({ start: f.start ?? 0, end: f.end ?? 0 })
-            spansCopy[li]!.spans.sort((a, b) => a.start - b.start)
-          }
-        }
-      }
-    }
-
-
-
-    return spansCopy
-  }
-
   // Run extraction when text is pasted or weights change
   useEffect(() => {
     if (pastedText !== null) {
@@ -229,27 +190,30 @@ function App() {
           setLines(linesArray)
           let spans = spanGenerator(linesArray)
 
-          // Re-apply any user feedback to the freshly generated spans so that
-          // feedback-driven span assertions survive subsequent weight-driven re-runs.
-          spans = applyFeedbackToSpans(spans)
+          // If there is feedback, re-decode while honoring it as hard constraints
+          // so asserted spans/labels persist across subsequent re-decodes.
+          const decodeOpts = { maxStates: 512, safePrefix: 6 }
+          const { pred: decoded, spansPerLine: spansWithFeedback } = (feedbackEntries.length > 0)
+            ? decodeJointSequenceWithFeedback(
+                linesArray,
+                spans,
+                weights,
+                householdInfoSchema,
+                boundaryFeatures,
+                segmentFeatures,
+                { entries: feedbackEntries },
+                decodeOpts
+              )
+            : { pred: decodeJointSequence(linesArray, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, decodeOpts), spansPerLine: spans }
 
+          spans = spansWithFeedback
           setSpansPerLine(spans)
-
-          const jointSeq = decodeJointSequence(
-            linesArray,
-            spans,
-            weights,
-            householdInfoSchema,
-            boundaryFeatures,
-            segmentFeatures,
-            { maxStates: 512, safePrefix: 6 }
-          )
-          setJointSeq(jointSeq)
+          setJointSeq(decoded)
 
           const extractedRecords = entitiesFromJointSequence(
             linesArray,
             spans,
-            jointSeq,
+            decoded,
             weights,
             segmentFeatures,
             householdInfoSchema
@@ -261,7 +225,7 @@ function App() {
         }
       }, 0)
     }
-  }, [pastedText, weights, suppressExtractionOnWeightChange])
+  }, [pastedText, weights])
 
   // Handle text selection
   useEffect(() => {
@@ -391,18 +355,6 @@ function App() {
       confidence: 1.0
     }
 
-    // First, remove any entity/sub-entity conflicts that overlap our selected lines
-    const { remainingEntities, newFieldHist, newBoundarySet } = removeEntityConflicts(startLine, endLine)
-
-    // Remove conflicting feedback (same or overlapping span on same line) from the filtered field history
-    const filteredHistory = newFieldHist.filter(f => {
-      if (f.lineIndex !== startLine) return true
-      // Check for overlap
-      const fStart = f.start ?? 0
-      const fEnd = f.end ?? 0
-      return !(fStart < actualEndOffset && fEnd > startOffset)
-    })
-
     // Find spans that conflict with the new selection and mark them for removal (derived from current records)
     const conflictingSpans: FieldAssertion[] = []
     if (records) {
@@ -427,40 +379,14 @@ function App() {
       }
     }
 
-    const updatedHistory = [...filteredHistory, ...conflictingSpans, newFeedback]
+    const newEntries: FeedbackEntry[] = [
+      ...feedbackEntries,
+      ...conflictingSpans.map(f => ({ kind: 'field', field: f } as const)),
+      { kind: 'field', field: newFeedback }
+    ]
 
-    // Ensure entity history includes this field assertion attached to the entity at startLine
-    const newEntityHist: EntityAssertion[] = remainingEntities.map(e => ({
-      ...(e.startLine !== undefined ? { startLine: e.startLine } : {}),
-      ...(e.endLine !== undefined ? { endLine: e.endLine } : {}),
-      ...(e.entityType !== undefined ? { entityType: e.entityType as EntityType } : {}),
-      ...(e.fields ? { fields: e.fields } : {})
-    }))
-
-    const entIdx = newEntityHist.findIndex(e => e.startLine === startLine)
-    if (entIdx >= 0) {
-      const existing = newEntityHist[entIdx]!
-      const ent: EntityAssertion = {
-        ...(existing.startLine !== undefined ? { startLine: existing.startLine } : {}),
-        ...(existing.endLine !== undefined ? { endLine: existing.endLine } : {}),
-        ...(existing.entityType !== undefined ? { entityType: existing.entityType as EntityType } : {}),
-        fields: [...(existing.fields ?? []), newFeedback]
-      }
-      newEntityHist[entIdx] = ent
-    } else {
-      newEntityHist.push({ startLine, fields: [newFeedback] })
-    }
-
-    setFeedbackHistory(updatedHistory)
-    setEntityFeedbackHistory(newEntityHist)
-    setBoundaryCorrections(newBoundarySet)
-
-    // Build and log the exact Feedback object that will be submitted to the library
-    // const feedbackToSubmit = buildFeedback(remainingEntities, updatedHistory, newBoundarySet)
-    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
-
-    // Submit unified feedback (entities + fields + boundaries)
-    submitUnifiedFeedback(remainingEntities, updatedHistory, newBoundarySet)
+    setFeedbackEntries(newEntries)
+    submitUnifiedFeedback(newEntries)
   }
 
   // Record/sub-entity feedback handler (called when pressing Legend button)
@@ -473,33 +399,15 @@ function App() {
     const startLine = offsetToLine(start)
     const endLine = offsetToLine(Math.max(start, end - 1))
 
-    // Remove any existing conflicting entity or field feedback that overlaps this range
-    const { remainingEntities, newFieldHist, newBoundarySet } = removeEntityConflicts(startLine, endLine)
+    const newEntries: FeedbackEntry[] = (() => {
+      if (entityType != null) {
+        return [...feedbackEntries, { kind: 'subEntity', startLine, endLine, entityType: entityType as EntityType }]
+      }
+      return [...feedbackEntries, { kind: 'record', startLine, endLine }]
+    })()
 
-    // Add this boundary to the set (use startLine as canonical)
-    newBoundarySet.add(startLine)
-    setBoundaryCorrections(newBoundarySet)
-
-    // Add to UI-visible entity feedback history (keep endLine for display purposes)
-    // Include any fields within the asserted range [startLine..endLine] so they are
-    // attached to the entity for display and submission.
-    const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
-    const newEntry: EntityAssertion = {
-      startLine,
-      ...(endLine !== undefined ? { endLine } : {}),
-      ...(entityType != null ? { entityType: entityType as EntityType } : {}),
-      ...(matchedFields.length ? { fields: matchedFields } : {})
-    }
-    const newEntityHist: EntityAssertion[] = [...remainingEntities.map(e => ({ ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), ...(e.endLine !== undefined ? { endLine: e.endLine } : {}), ...(e.entityType !== undefined ? { entityType: e.entityType as EntityType } : {}), ...(e.fields ? { fields: e.fields } : {}) })), newEntry]
-    setEntityFeedbackHistory(newEntityHist)
-    setFeedbackHistory(newFieldHist)
-
-    // Build and log the exact Feedback object that will be submitted to the library
-    // const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
-    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
-
-    // Submit unified feedback (entities + fields + boundaries)
-    submitUnifiedFeedback(newEntityHist, newFieldHist, newBoundarySet)
+    setFeedbackEntries(newEntries)
+    submitUnifiedFeedback(newEntries)
   }
 
   // Assert selected range as a sub-entity of the given type. If no selection,
@@ -517,44 +425,52 @@ function App() {
     const startLine = offsetToLine(start)
     const endLine = offsetToLine(Math.max(start, end - 1))
 
-    // Remove conflicts overlapping this range
-    const { remainingEntities, newFieldHist, newBoundarySet } = removeEntityConflicts(startLine, endLine)
-
-    // Ensure this asserted sub-entity is registered as a boundary (use startLine)
-    newBoundarySet.add(startLine)
-
-    // Record the assertion in UI history (attach any field assertions for display)
-    // Include any fields that lie on lines within the asserted span [startLine..endLine]
-    const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
-    const newEntry: EntityAssertion = {
-      startLine,
-      ...(endLine !== undefined ? { endLine } : {}),
-      entityType: type as EntityType,
-      ...(matchedFields.length ? { fields: matchedFields } : {})
-    }
-    const newEntityHist: EntityAssertion[] = [...remainingEntities, newEntry]
-    setEntityFeedbackHistory(newEntityHist)
-    setFeedbackHistory(newFieldHist)
-    setBoundaryCorrections(newBoundarySet)
-
-    // Build and log the exact Feedback object that will be submitted to the library
-    // const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
-    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
-
-    // Submit unified feedback (entities + fields + boundaries)
-    submitUnifiedFeedback(newEntityHist, newFieldHist, newBoundarySet)
+    const newEntries: FeedbackEntry[] = [...feedbackEntries, { kind: 'subEntity', startLine, endLine, entityType: type as EntityType }]
+    setFeedbackEntries(newEntries)
+    submitUnifiedFeedback(newEntries)
   }
 
 
   useEffect(() => {
     if (!records) return;
 
-    console.log(records);
-  }, [records])
+    console.log('records', records);
+  }, [records, normalizedText])
 
   const renderedContent = useMemo(() => {
     if (!normalizedText || !records) return null
-    return renderWithSpans(normalizedText, records, hoverState, setHoverState)
+
+    // Defensive: clamp any out-of-bounds record offsets created by upstream code
+    const textLen = normalizedText.length
+    let adjusted = false
+    const sanitized: RecordSpan[] = records.map(r => {
+      const fs = Math.max(0, Math.min(textLen, r.fileStart ?? 0))
+      const fe = Math.max(0, Math.min(textLen, r.fileEnd ?? fs))
+      if (fs !== (r.fileStart ?? 0) || fe !== (r.fileEnd ?? 0)) adjusted = true
+      // Also clamp sub-entity and field positions to inside [fs, fe]
+      const subEntities = (r.subEntities ?? []).map(se => ({
+        ...se,
+        fileStart: Math.max(fs, Math.min(textLen, se.fileStart ?? fs)),
+        fileEnd: Math.max(fs, Math.min(textLen, se.fileEnd ?? fe)),
+        fields: (se.fields ?? []).map(f => ({ ...f,
+          fileStart: Math.max(fs, Math.min(textLen, f.fileStart ?? fs)),
+          fileEnd: Math.max(fs, Math.min(textLen, f.fileEnd ?? fe))
+        }))
+      }))
+      return { ...r, fileStart: fs, fileEnd: fe, subEntities }
+    })
+
+    // Rendering assumes records are in document order.
+    sanitized.sort((a, b) => {
+      if (a.fileStart !== b.fileStart) return a.fileStart - b.fileStart
+      if (a.fileEnd !== b.fileEnd) return a.fileEnd - b.fileEnd
+      if (a.startLine !== b.startLine) return a.startLine - b.startLine
+      return a.endLine - b.endLine
+    })
+
+    if (adjusted) console.warn('Adjusted out-of-bounds record offsets for rendering')
+
+    return renderWithSpans(normalizedText, sanitized, hoverState, setHoverState)
   }, [normalizedText, records, hoverState])
 
   // Ensure the UI shows all known sub-entity types (even if none were decoded)
@@ -676,35 +592,47 @@ function App() {
                 </div>
 
                 <div className="legend-section">
-                  <h3>Feedback (recent)</h3>
-                  <div className="legend-items feedback-list">
-                    <div className="legend-item feedback-entities">
-                      <strong>Entities:</strong>
-                      {entityFeedbackHistory.length === 0 ? <div className="feedback-empty">(none)</div> : (
-                        <ul>
-                          {entityFeedbackHistory.map((e, idx) => (
-                            <li key={`ent-${idx}`}>
-                              Line {e.startLine}{e.endLine !== undefined && e.endLine !== e.startLine ? `–${e.endLine}` : ''} {e.entityType ? `as ${e.entityType}` : '(Record)'}
-                              {e.fields && e.fields.length ? (
-                                <ul>
-                                  {e.fields.map((f, i) => (
-                                    <li key={`ef-${idx}-${i}`}>{f.action ?? 'add'} {f.fieldType} ({f.start}-{f.end})</li>
-                                  ))}
-                                </ul>
-                              ) : null}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                  <h3>Feedback</h3>
+                  <div className="legend-items">
+                    <div className="legend-item">
+                      <button
+                        type="button"
+                        className="record-button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={clearFeedbackKeepWeights}
+                        disabled={feedbackEntries.length === 0}
+                        aria-disabled={feedbackEntries.length === 0}
+                      >
+                        Clear feedback
+                      </button>
                     </div>
-
+                  </div>
+                  <div className="legend-items feedback-list">
                     <div className="legend-item feedback-fields">
-                      <strong>Fields:</strong>
-                      {feedbackHistory.length === 0 ? <div className="feedback-empty">(none)</div> : (
+                      {feedbackEntries.length === 0 ? <div className="feedback-empty">(none)</div> : (
                         <ul>
-                          {feedbackHistory.map((f, idx) => (
-                            <li key={`f-${idx}`}>{f.action ?? 'add'} {f.fieldType} on line {f.lineIndex} ({f.start}-{f.end})</li>
-                          ))}
+                          {feedbackEntries.map((entry, idx) => {
+                            if (entry.kind === 'record') {
+                              return (
+                                <li key={`e-${idx}`}>
+                                  #{idx + 1} Record: line {entry.startLine}{entry.endLine !== entry.startLine ? `–${entry.endLine}` : ''}
+                                </li>
+                              )
+                            }
+                            if (entry.kind === 'subEntity') {
+                              return (
+                                <li key={`e-${idx}`}>
+                                  #{idx + 1} Sub-Entity: {entry.entityType} line {entry.startLine}{entry.endLine !== entry.startLine ? `–${entry.endLine}` : ''}
+                                </li>
+                              )
+                            }
+                            const f = entry.field
+                            return (
+                              <li key={`e-${idx}`}>
+                                #{idx + 1} Field: {f.action ?? 'add'} {f.fieldType} on line {f.lineIndex} ({f.start}-{f.end})
+                              </li>
+                            )
+                          })}
                         </ul>
                       )}
                     </div>
@@ -738,7 +666,7 @@ function renderWithSpans(
     )
   }
 
-  for (const record of records) {
+  for (const [idx, record] of records.entries()) {
     // Add text before this record
     if (lastEnd < record.fileStart) {
       const gapText = text.slice(lastEnd, record.fileStart)
@@ -758,7 +686,12 @@ function renderWithSpans(
 
     // Render the record with its nested spans as a block element
     elements.push(
-      <div key={`record-${record.fileStart}`} className="record-span" data-file-start={record.fileStart} data-file-end={record.fileEnd}>
+      <div
+        key={`record-${record.startLine}-${record.endLine}-${record.fileStart}-${record.fileEnd}-${idx}`}
+        className="record-span"
+        data-file-start={record.fileStart}
+        data-file-end={record.fileEnd}
+      >
         {renderSubEntities(text, record.subEntities, record.fileStart, record.fileEnd, hoverState, setHoverState)}
       </div>
     )
@@ -821,7 +754,7 @@ function renderSubEntities(
       }
     }
 
-    const spanId = `sub-entity-${subEntity.fileStart}`
+    const spanId = `sub-entity-${subEntity.fileStart}-${subEntity.fileEnd}`
     const isExact = hoverState.type === 'subEntity' && hoverState.spanId === spanId
     const isSimilar = hoverState.type === 'subEntity' && hoverState.value === subEntity.entityType && !isExact
 
@@ -887,7 +820,7 @@ function renderFields(
       )
     }
 
-    const spanId = `field-${field.fileStart}`
+    const spanId = `field-${field.fileStart}-${field.fileEnd}`
     const isExact = hoverState.type === 'field' && hoverState.spanId === spanId
     const isSimilar = hoverState.type === 'field' && hoverState.value === field.fieldType && !isExact
 

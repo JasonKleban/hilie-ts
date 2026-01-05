@@ -3,7 +3,6 @@
   flex-direction: column;
   height: 100vh;
   background-color: #242424;
-  color: rgba(255, 255, 255, 0.87);
 }
 
 .progress-indicator {
@@ -98,7 +97,6 @@
 .boundary-button {
   padding: 0.75rem 1.5rem;
   background: linear-gradient(135deg, #646cff 0%, #535bf2 100%);
-  color: white;
   border: none;
   border-radius: 6px;
   font-size: 1em;
@@ -123,27 +121,26 @@
   white-space: pre-wrap;
   word-wrap: break-word;
   line-height: 1.6;
-  color: rgba(255, 255, 255, 0.87);
 }
 
 /* RecordSpan - Largest border, outermost */
 .record-span {
-  border: 3px solid rgba(100, 108, 255, 0.4);
-  border-radius: 8px;
-  padding: 12px;
-  margin: 8px 0;
+  outline: 1px solid rgba(100, 108, 255, 0.4);
+  outline-offset: -1px;
+  border-radius: 2px;
+  padding: 3px 3px;
+  margin: 6px;
   display: block;
   background-color: rgba(100, 108, 255, 0.03);
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
+  width: fit-content;
 }
 
 /* SubEntitySpan - Medium border, middle layer */
 .sub-entity-span {
-  border: 2px solid rgba(83, 191, 242, 0.3);
-  border-radius: 6px;
-  padding: 8px;
-  margin: 6px 0;
+  outline: 1px solid rgba(83, 191, 242, 0.3);
+  outline-offset: -1px;
+  border-radius: 2px;
+  padding: 3px 0;
   display: inline-block;
   background-color: rgba(83, 191, 242, 0.02);
   box-decoration-break: clone;
@@ -165,10 +162,9 @@
 
 /* FieldSpan - Smallest border, innermost */
 .field-span {
-  border: 1px solid rgba(144, 238, 144, 0.4);
-  border-radius: 4px;
-  padding: 4px 6px;
-  margin: 2px;
+  outline: 1px solid rgba(144, 238, 144, 0.4);
+  outline-offset: -1px;
+  border-radius: 1px;
   display: inline-block;
   background-color: rgba(144, 238, 144, 0.05);
   box-decoration-break: clone;
@@ -215,13 +211,11 @@
 .legend h2 {
   margin: 0 0 1rem 0;
   font-size: 1.2em;
-  color: rgba(255, 255, 255, 0.87);
 }
 
 .legend h3 {
   margin: 0 0 0.75rem 0;
   font-size: 0.95em;
-  color: rgba(255, 255, 255, 0.7);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -307,7 +301,6 @@
 
 .max-allowed {
   font-size: 0.75em;
-  color: rgba(255, 255, 255, 0.5);
   font-style: italic;
 }
 
@@ -408,12 +401,10 @@
   .feedback-list ul {
     margin: 0.25rem 0 0 1rem;
     padding: 0;
-    color: rgba(255,255,255,0.8);
     font-size: 0.85em;
   }
 
   .feedback-empty {
-    color: rgba(255,255,255,0.45);
     font-size: 0.85em;
   }
 

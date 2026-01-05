@@ -1,5 +1,6 @@
 import type { FieldLabel, FieldSchema, FieldConfig, FeatureContext, JointState, LineSpans, BoundaryState, EnumerateOptions, FieldSpan, Feedback, JointSequence, RecordSpan, SubEntitySpan, SubEntityType, Feature } from './types.js';
 import { boundaryFeatures, segmentFeatures } from './features.js';
+import { normalizeFeedback } from './feedbackUtils.js';
 
 interface VCell {
   score: number;
@@ -771,6 +772,155 @@ export function entitiesFromJointSequence(
 }
 
 /**
+ * Decode a joint sequence while honoring user feedback constraints.
+ *
+ * Unlike `updateWeightsFromUserFeedback`, this does not modify weights.
+ * It applies feedback as hard constraints (span additions/removals + forced
+ * labels + record-boundary constraints + sub-entity type ranges) so callers can
+ * re-run decoding without losing asserted spans.
+ */
+export function decodeJointSequenceWithFeedback(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  weights: Record<string, number>,
+  schema: FieldSchema,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  feedback: Feedback,
+  enumerateOpts?: EnumerateOptions
+): { pred: JointSequence; spansPerLine: LineSpans[] } {
+  const normalizedFeedback = normalizeFeedback(feedback);
+  const feedbackEntities = normalizedFeedback.entities;
+  const recordAssertions = normalizedFeedback.records;
+  const feedbackSubEntities = normalizedFeedback.subEntities;
+
+  const spansCopy: LineSpans[] = spansPerLine.map(s => ({
+    lineIndex: s.lineIndex,
+    spans: s.spans.map(sp => ({ start: sp.start, end: sp.end }))
+  }));
+
+  function ensureLine(li: number) {
+    if (li < 0 || li >= spansCopy.length) return false;
+    spansCopy[li] = spansCopy[li] ?? { lineIndex: li, spans: [] };
+    return true;
+  }
+
+  function findSpanIndex(lineIdx: number, start?: number, end?: number) {
+    const s = spansCopy[lineIdx];
+    if (!s) return -1;
+    if (start === undefined || end === undefined) return -1;
+    return s.spans.findIndex(x => x.start === start && x.end === end);
+  }
+
+  // Apply feedback span add/remove operations and build forced label map
+  const labelMap: Record<string, FieldLabel> = {}; // key = `${line}:${start}-${end}`
+
+  for (const ent of feedbackEntities ?? []) {
+    const entStartLine = ent.startLine ?? null;
+    for (const f of ent.fields ?? []) {
+      const li = (f.lineIndex ?? entStartLine);
+      if (li === null || li === undefined) continue;
+      if (!ensureLine(li)) continue;
+
+      const action = f.action ?? 'add';
+      if (action === 'remove') {
+        const idx = findSpanIndex(li, f.start, f.end);
+        if (idx >= 0) spansCopy[li]!.spans.splice(idx, 1);
+        continue;
+      }
+
+      // add/assert: ensure the span exists
+      const idx = findSpanIndex(li, f.start, f.end);
+      if (idx < 0 && f.start !== undefined && f.end !== undefined) {
+        spansCopy[li]!.spans.push({ start: f.start, end: f.end });
+        spansCopy[li]!.spans.sort((a, b) => a.start - b.start);
+      }
+
+      if (f.fieldType && f.start !== undefined && f.end !== undefined) {
+        labelMap[`${li}:${f.start}-${f.end}`] = f.fieldType;
+      }
+    }
+  }
+
+  const forcedLabelsByLine: Record<number, Record<string, FieldLabel>> = {};
+  for (const [key, lab] of Object.entries(labelMap)) {
+    const [lineStr, range] = key.split(':');
+    if (!range) continue;
+    const lineIdx = Number(lineStr);
+    if (Number.isNaN(lineIdx)) continue;
+    const map = forcedLabelsByLine[lineIdx] ?? (forcedLabelsByLine[lineIdx] = {});
+    map[range] = lab;
+  }
+
+  // Forced boundaries from explicit record assertions only
+  const forcedBoundariesByLine: Record<number, BoundaryState> = {};
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine === undefined) continue;
+    if (r.startLine < 0 || r.startLine >= spansCopy.length) continue;
+    forcedBoundariesByLine[r.startLine] = 'B';
+    const lastLine = (r.endLine !== undefined && r.endLine >= r.startLine) ? r.endLine : (spansCopy.length - 1);
+    const boundedLast = Math.min(lastLine, spansCopy.length - 1);
+    for (let li = r.startLine + 1; li <= boundedLast; li++) forcedBoundariesByLine[li] = 'C';
+  }
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine === undefined || r.endLine === undefined) continue;
+    if (r.endLine < r.startLine) continue;
+    const nextLine = r.endLine + 1;
+    if (nextLine >= 0 && nextLine < spansCopy.length) {
+      forcedBoundariesByLine[nextLine] = 'B';
+    }
+  }
+
+  // Apply sub-entity type assertions across full ranges
+  const entityTypeMap: Record<number, SubEntityType> = {};
+  for (const ent of feedbackSubEntities ?? []) {
+    if (ent.startLine === undefined || ent.entityType === undefined) continue;
+    const startLine = ent.startLine;
+    const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine;
+    const boundedEnd = Math.min(endLine, spansCopy.length - 1);
+    for (let li = startLine; li <= boundedEnd; li++) {
+      entityTypeMap[li] = ent.entityType as SubEntityType;
+    }
+  }
+
+  // Expand safePrefix when feedback targets spans beyond the default prefix.
+  let maxAssertedSpanIdx = -1;
+  for (const ent of feedbackEntities ?? []) {
+    for (const f of ent.fields ?? []) {
+      const li = f.lineIndex ?? ent.startLine;
+      if (li === undefined || li === null) continue;
+      if (li < 0 || li >= spansCopy.length) continue;
+      const idx = spansCopy[li]?.spans.findIndex(sp => sp.start === f.start && sp.end === f.end) ?? -1;
+      if (idx > maxAssertedSpanIdx) maxAssertedSpanIdx = idx;
+    }
+  }
+
+  const finalEnumerateOpts: EnumerateOptions | undefined = (() => {
+    const base = enumerateOpts ?? {};
+    const safePrefix = (maxAssertedSpanIdx < 0)
+      ? base.safePrefix
+      : Math.max((base.safePrefix ?? 8), maxAssertedSpanIdx + 1);
+    return {
+      ...base,
+      ...(safePrefix !== undefined ? { safePrefix } : {}),
+      forcedLabelsByLine,
+      forcedBoundariesByLine
+    } as EnumerateOptions;
+  })();
+
+  const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
+
+  // Ensure returned prediction reflects explicit sub-entity type assertions.
+  for (let li = 0; li < pred.length; li++) {
+    const forcedType = entityTypeMap[li];
+    if (!forcedType) continue;
+    pred[li] = { ...(pred[li] ?? { boundary: 'C', fields: [] }), entityType: forcedType };
+  }
+
+  return { pred, spansPerLine: spansCopy };
+}
+
+/**
  * Update model weights using user feedback (fields added or removed).
  *
  * Purpose: incorporate sparse user corrections by updating weights based on
@@ -813,6 +963,12 @@ export function updateWeightsFromUserFeedback(
   enumerateOpts?: EnumerateOptions,
   stabilizationFactor = 0.15
 ): { updated: Record<string, number>; pred: JointSequence; spansPerLine?: LineSpans[] } {
+  const normalizedFeedback = normalizeFeedback(feedback);
+  const feedbackEntities = normalizedFeedback.entities;
+  const feedbackSubEntities = normalizedFeedback.subEntities;
+  const recordAssertions = normalizedFeedback.records;
+  const subEntityAssertions = normalizedFeedback.subEntities;
+
   // Clone spans so we can modify
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }));
 
@@ -830,7 +986,7 @@ export function updateWeightsFromUserFeedback(
     return s.spans.findIndex(x => x.start === start && x.end === end);
   }
 
-  for (const ent of feedback.entities ?? []) {
+  for (const ent of feedbackEntities ?? []) {
     const entStartLine = ent.startLine ?? null;
 
     for (const f of ent.fields ?? []) {
@@ -864,7 +1020,7 @@ export function updateWeightsFromUserFeedback(
 
   // Expand safePrefix when feedback targets spans beyond the default prefix.
   let maxAssertedSpanIdx = -1;
-  for (const ent of feedback.entities ?? []) {
+  for (const ent of feedbackEntities ?? []) {
     for (const f of ent.fields ?? []) {
       const li = f.lineIndex ?? ent.startLine;
       if (li === undefined || li === null) continue;
@@ -885,7 +1041,7 @@ export function updateWeightsFromUserFeedback(
 
   // create a quick mapping from feedback assertions to labels per-line/start/end
   const labelMap: Record<string, FieldLabel> = {}; // key = `${line}:${start}-${end}`
-  for (const ent of feedback.entities ?? []) {
+  for (const ent of feedbackEntities ?? []) {
     for (const f of ent.fields ?? []) {
       if (f.action === 'remove') continue;
       if (f.fieldType) {
@@ -899,32 +1055,46 @@ export function updateWeightsFromUserFeedback(
 
   // Map explicit entityType assertions (sub-entity type) from feedback
   const entityTypeMap: Record<number, SubEntityType> = {};
-  for (const ent of feedback.entities ?? []) {
-    if (ent.startLine !== undefined && ent.entityType !== undefined) {
-      entityTypeMap[ent.startLine] = ent.entityType as SubEntityType;
+  for (const ent of feedbackSubEntities ?? []) {
+    if (ent.startLine === undefined || ent.entityType === undefined) continue;
+    const startLine = ent.startLine;
+    const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine;
+    const boundedEnd = Math.min(endLine, spansCopy.length - 1);
+    for (let li = startLine; li <= boundedEnd; li++) {
+      entityTypeMap[li] = ent.entityType as SubEntityType;
     }
   }
 
-  // Determine boundary choices: prefer feedback entity starts when provided, otherwise fall back to the provided joint sequence
+  // Determine boundary choices: prefer explicit record assertions when provided,
+  // otherwise fall back to the provided joint sequence.
   const boundarySet = new Set<number>();
-  for (const ent of feedback.entities ?? []) {
-    if (ent.startLine !== undefined) boundarySet.add(ent.startLine);
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine !== undefined) boundarySet.add(r.startLine);
   }
 
-  // Build forced boundary map from explicit entity ranges. If an entity
-  // asserts a startLine we force that line to be 'B'. If the entity provides
-  // an endLine we force interior lines to be 'C'. If endLine is omitted we
-  // assume the entity runs to the end of the document and force subsequent
-  // lines to 'C' as well. This ensures asserting a multi-line record without
-  // an explicit end still prevents the decoder from starting records inside it.
+  // Build forced boundary map from explicit *record* ranges.
+  // IMPORTANT: sub-entity assertions must NOT force boundary 'B' at their
+  // startLine, otherwise they would incorrectly split an asserted record.
   const forcedBoundariesByLine: Record<number, BoundaryState> = {};
-  for (const ent of feedback.entities ?? []) {
-    if (ent.startLine !== undefined) {
-      forcedBoundariesByLine[ent.startLine] = 'B';
-      const lastLine = (ent.endLine !== undefined && ent.endLine >= ent.startLine) ? ent.endLine : (spansCopy.length - 1);
-      for (let li = ent.startLine + 1; li <= lastLine; li++) {
-        forcedBoundariesByLine[li] = 'C';
-      }
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine === undefined) continue;
+    forcedBoundariesByLine[r.startLine] = 'B';
+    const lastLine = (r.endLine !== undefined && r.endLine >= r.startLine) ? r.endLine : (spansCopy.length - 1);
+    for (let li = r.startLine + 1; li <= lastLine; li++) {
+      forcedBoundariesByLine[li] = 'C';
+    }
+  }
+
+  // If the user asserts an explicit record range, treat it as a closed interval
+  // by also forcing a boundary at the next line (endLine + 1). This prevents a
+  // single record-range assertion from collapsing the entire document into one
+  // record when the model would otherwise choose 'C' boundaries afterwards.
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine === undefined || r.endLine === undefined) continue;
+    if (r.endLine < r.startLine) continue;
+    const nextLine = r.endLine + 1;
+    if (nextLine >= 0 && nextLine < spansCopy.length) {
+      forcedBoundariesByLine[nextLine] = 'B';
     }
   }
 
@@ -987,18 +1157,10 @@ export function updateWeightsFromUserFeedback(
   // so that any asserted labels are reflected in the returned prediction.
   let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
 
-  // Debug: log phone feature contributions when a Phone assertion is present
-  const assertedFieldsList = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+  // Debug: log phone feature contributions when a Phone/Email assertion is present
+  const assertedFieldsList = ([] as any[]).concat((feedbackEntities ?? []).flatMap((e: any) => e.fields ?? []));
   const phoneAsserted = assertedFieldsList.some(f => f.fieldType === 'Phone');
   const emailAsserted = assertedFieldsList.some(f => f.fieldType === 'Email');
-  if (phoneAsserted) {
-    // eslint-disable-next-line no-console
-    console.log('DBG updateWeights: vGold.segment.is_phone=', vGold['segment.is_phone'], 'vPred.segment.is_phone=', vPred['segment.is_phone']);
-  }
-  if (emailAsserted) {
-    // eslint-disable-next-line no-console
-    console.log('DBG updateWeights: vGold.segment.is_email=', vGold['segment.is_email'], 'vPred.segment.is_email=', vPred['segment.is_email']);
-  }
 
   // apply scaled update: w += lr * meanConf * (vGold - vPred)
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
@@ -1010,7 +1172,7 @@ export function updateWeightsFromUserFeedback(
   // Heuristic safety net: if user explicitly asserted a Phone/Email/ExtID but
   // the corresponding weighted delta ended up non-positive, attempt a targeted
   // nudge that is large enough to flip the score for the asserted span.
-  const assertedFields = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+  const assertedFields = ([] as any[]).concat((feedbackEntities ?? []).flatMap((e: any) => e.fields ?? []));
 
   const labelFeatureMap: Record<string, string> = {
     'Phone': 'segment.is_phone',
@@ -1032,7 +1194,7 @@ export function updateWeightsFromUserFeedback(
   // negative and will push weights away from features that favored the removed
   // label.
   for (const f of assertedFields.filter((x: any) => x.action === 'remove')) {
-    const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+    const li = f.lineIndex ?? 0;
     const origSpans = spansPerLine;
     const si = (origSpans[li]?.spans ?? []).findIndex((x: any) => x.start === f.start && x.end === f.end);
     if (si >= 0) {
@@ -1120,11 +1282,8 @@ export function updateWeightsFromUserFeedback(
     // find first asserted span with this label
     const f = assertedFields.find(x => x.fieldType === targetLabel);
     if (!f) return;
-    const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+    const li = f.lineIndex ?? 0;
     const si = (spansCopy[li]?.spans ?? []).findIndex(x => x.start === f.start && x.end === f.end);
-    // Debug: log si for observation
-    // eslint-disable-next-line no-console
-    console.log('DBG tryNudge: found asserted field', targetLabel, 'li', li, 'si', si);
     if (si < 0) return;
 
     // If already predicted as target *by the underlying (unforced) model*, nothing to do
@@ -1167,9 +1326,6 @@ export function updateWeightsFromUserFeedback(
     const scoreTarget = scoreWithWeights(weights, targetLabel);
     const scoreCurr = scoreWithWeights(weights, currLabel as FieldLabel);
 
-    // Debug: log nudge attempt metrics
-    // eslint-disable-next-line no-console
-    console.log('DBG tryNudge', featureId, targetLabel, 'li', li, 'si', si, 'curr', currLabel, 'scoreTarget', scoreTarget, 'scoreCurr', scoreCurr);
 
     if (scoreTarget > scoreCurr) {
       if (currLabel === targetLabel) return; // already favored and predicted
@@ -1179,8 +1335,6 @@ export function updateWeightsFromUserFeedback(
       const beforeSmall = weights[featureId] ?? 0;
       const smallNud = 0.5 * learningRate * meanConf;
       weights[featureId] = beforeSmall + smallNud;
-      // eslint-disable-next-line no-console
-      console.log('DBG tryNudge applied small corrective nudge', featureId, 'before', beforeSmall, 'after', weights[featureId], 'nud', smallNud);
       // continue with full slope estimation below
     }
 
@@ -1199,8 +1353,6 @@ export function updateWeightsFromUserFeedback(
       const nud = Math.max(needed, 0.5) * learningRate * meanConf; // at least small nudge
       const before = weights[featureId] ?? 0;
       weights[featureId] = before + nud;
-      // eslint-disable-next-line no-console
-      console.log('DBG tryNudge applied slope nudge', featureId, 'before', before, 'after', weights[featureId], 'nud', nud);
     } else {
       // try to find an alternative feature that actually moves the target vs current gap
       let bestFeat: string | null = null;
@@ -1220,14 +1372,10 @@ export function updateWeightsFromUserFeedback(
         const nud = Math.max(needed, 0.5) * learningRate * meanConf;
         const before = weights[bestFeat] ?? 0;
         weights[bestFeat] = before + nud;
-        // eslint-disable-next-line no-console
-        console.log('DBG tryNudge applied alt-feature nudge', bestFeat, 'before', before, 'after', weights[bestFeat], 'nud', nud);
       } else {
         // fallback large nudge on original feature
         const before = weights[featureId] ?? 0;
         weights[featureId] = before + learningRate * meanConf * 8.0;
-        // eslint-disable-next-line no-console
-        console.log('DBG tryNudge applied fallback nudge', featureId, 'before', before, 'after', weights[featureId]);
       }
     }
 
@@ -1245,7 +1393,8 @@ export function updateWeightsFromUserFeedback(
       pred = predLocal;
 
       for (const f of assertedFields.filter((x: any) => x.action !== 'remove')) {
-        const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+        const defaultStart = (recordAssertions && recordAssertions[0] && recordAssertions[0]!.startLine) ?? 0;
+        const li = f.lineIndex ?? defaultStart;
         const spansForLine = spansCopy[li]?.spans ?? [];
         const idx = spansForLine.findIndex(s => s.start === f.start && s.end === f.end);
         if (idx < 0) continue;
@@ -1270,9 +1419,6 @@ export function updateWeightsFromUserFeedback(
   }
 
   // Try targeted nudges for asserted detectors
-  // Debug: log that we're about to try nudging key detectors
-  // eslint-disable-next-line no-console
-  console.log('DBG tryNudge calls: phone/email/extid');
   tryNudge('segment.is_phone', 'Phone');
   tryNudge('segment.is_email', 'Email');
   tryNudge('segment.is_extid', 'ExtID');
@@ -1360,6 +1506,72 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
+  // Iteratively apply small, conservative boundary nudges for asserted multi-line
+  // entities that still exhibit interior 'B' boundaries after the initial update.
+  // We only decrease weights for features that positively supported a 'B' (delta<0)
+  // and restrict changes to line-level features to avoid wide side-effects.
+  const BOUNDARY_NUDGE_SCALE = 0.5;
+  const MAX_BOUNDARY_STEP = 0.5;
+  const ITER_BOUNDARY = 5;
+
+  for (let iter = 0; iter < ITER_BOUNDARY; iter++) {
+    const freshCheck = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+    let anyChanged = false;
+
+    for (const ent of feedbackEntities ?? []) {
+      if (ent.startLine === undefined) continue;
+      const lastLine = (ent.endLine !== undefined && ent.endLine >= ent.startLine) ? ent.endLine : (spansCopy.length - 1);
+
+      // 1) Suppress interior spurious B boundaries by nudging line-level features toward C
+      for (let li = ent.startLine + 1; li <= lastLine; li++) {
+        if (!freshCheck[li] || freshCheck[li]!.boundary !== 'B') continue;
+
+        const jointPred = freshCheck.map(s => s ? ({ boundary: s.boundary, fields: s.fields.slice() }) : { boundary: 'C', fields: [] });
+        const jointGold = jointPred.map(s => s ? ({ boundary: s.boundary, fields: s.fields.slice() }) : { boundary: 'C', fields: [] });
+        jointGold[li] = { boundary: 'C', fields: jointGold[li]!.fields };
+
+        const vPredBoundary = extractJointFeatureVector(lines, spansCopy, jointPred as any, boundaryFeaturesArg, segmentFeaturesArg, schema);
+        const vGoldBoundary = extractJointFeatureVector(lines, spansCopy, jointGold as any, boundaryFeaturesArg, segmentFeaturesArg, schema);
+
+        const keys = new Set<string>([...Object.keys(vPredBoundary), ...Object.keys(vGoldBoundary)]);
+        for (const k of keys) {
+          if (!k.startsWith('line.')) continue; // only adjust line-level features
+          const delta = (vGoldBoundary[k] ?? 0) - (vPredBoundary[k] ?? 0);
+          const step = Math.max(Math.min(delta, MAX_BOUNDARY_STEP), -MAX_BOUNDARY_STEP);
+          const adj = learningRate * meanConf * BOUNDARY_NUDGE_SCALE * step;
+          if (Math.abs(adj) > 1e-9) {
+            weights[k] = (weights[k] ?? 0) + adj;
+            anyChanged = true;
+          }
+        }
+      }
+
+      // 2) Reinforce asserted startLine as B if suppressed
+      if (freshCheck[ent.startLine] && freshCheck[ent.startLine]!.boundary !== 'B') {
+        const jointPred = freshCheck.map(s => s ? ({ boundary: s.boundary, fields: s.fields.slice() }) : { boundary: 'C', fields: [] });
+        const jointGold = jointPred.map(s => s ? ({ boundary: s.boundary, fields: s.fields.slice() }) : { boundary: 'C', fields: [] });
+        jointGold[ent.startLine] = { boundary: 'B', fields: jointGold[ent.startLine]!.fields };
+
+        const vPredBoundary = extractJointFeatureVector(lines, spansCopy, jointPred as any, boundaryFeaturesArg, segmentFeaturesArg, schema);
+        const vGoldBoundary = extractJointFeatureVector(lines, spansCopy, jointGold as any, boundaryFeaturesArg, segmentFeaturesArg, schema);
+
+        const keys = new Set<string>([...Object.keys(vPredBoundary), ...Object.keys(vGoldBoundary)]);
+        for (const k of keys) {
+          if (!k.startsWith('line.')) continue;
+          const delta = (vGoldBoundary[k] ?? 0) - (vPredBoundary[k] ?? 0);
+          const step = Math.max(Math.min(delta, MAX_BOUNDARY_STEP), -MAX_BOUNDARY_STEP);
+          const adj = learningRate * meanConf * BOUNDARY_NUDGE_SCALE * step;
+          if (Math.abs(adj) > 1e-9) {
+            weights[k] = (weights[k] ?? 0) + adj;
+            anyChanged = true;
+          }
+        }
+      }
+    }
+
+    if (!anyChanged) break;
+  }
+
   let predAfterUpdate = decodeJointSequence(
     lines,
     spansCopy,
@@ -1400,8 +1612,18 @@ export function updateWeightsFromUserFeedback(
     }
 
     // Also apply any explicit entityType assertions (ensure UI feedback is reflected immediately)
-    const ent = (feedback.entities ?? []).find(e => e.startLine === li && e.entityType !== undefined);
-    const entityType = ent ? ent.entityType : state.entityType;
+    // Apply across the full asserted [startLine, endLine] range (inclusive).
+    const entityType = (() => {
+      const list = (subEntityAssertions ?? []) as any[];
+      for (let i = list.length - 1; i >= 0; i--) {
+        const e = list[i];
+        if (!e || e.entityType === undefined || e.startLine === undefined) continue;
+        const startLine = e.startLine as number;
+        const endLine = (e.endLine !== undefined && e.endLine >= startLine) ? (e.endLine as number) : startLine;
+        if (li >= startLine && li <= endLine) return e.entityType;
+      }
+      return state.entityType;
+    })();
 
     return { ...state, fields, entityType } as JointState;
   });

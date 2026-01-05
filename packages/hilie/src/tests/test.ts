@@ -60,9 +60,7 @@ async function runDataDrivenTests() {
     const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights, sFeatures, householdInfoSchema);
 
     records.slice(0, 3).forEach((record, i) => {
-      console.log();
-      console.log(content.slice(record.fileStart, record.fileEnd + 1));
-      console.log(JSON.stringify(record, null, 2));
+      // Diagnostic output removed for cleaner test output
     });
   }
 }
