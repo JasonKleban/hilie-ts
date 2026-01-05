@@ -36,6 +36,18 @@ type HoverState = {
   spanId?: string // Specific span being hovered
 }
 
+// Render a raw slice of the document as-is, and provide a stable
+// `data-file-start` anchor so selection->offset mapping remains accurate even
+// in unannotated gaps between spans.
+function renderRawText(text: string, start: number, end: number, key: string): ReactNode {
+  if (end <= start) return null
+  return (
+    <span key={key} className="raw-text" data-file-start={start} data-file-end={end}>
+      {text.slice(start, end)}
+    </span>
+  )
+}
+
 function App() {
   const [pastedText, setPastedText] = useState<string | null>(null)
   const [normalizedText, setNormalizedText] = useState<string | null>(null)
@@ -292,18 +304,21 @@ function App() {
       } else if (start === null && end !== null) {
         start = Math.max(0, end - sanitizedSelectedText.length)
       } else {
-        // both present - normalize in case invisible nodes extended the range
+        // Both endpoints resolved via anchors.
+        // IMPORTANT: do not "fix" end by using selection.toString() length.
+        // Browsers may inject extra '\n' when selection crosses block elements
+        // (e.g. between .record-span blocks), which would incorrectly extend
+        // the computed end into the next record.
         if (end! < start!) {
-          const s = Math.min(start!, end!)
-          start = s
-          end = Math.min(docLen, s + selectedText.length)
-        } else {
-          // Prefer using start + selectedText.length when it differs from DOM-derived lengths
-          const expectedEnd = Math.min(docLen, start! + sanitizedSelectedText.length)
-          if (end! - start! !== sanitizedSelectedText.length) {
-            end = expectedEnd
-          }
+          const s = start!
+          start = end!
+          end = s
         }
+
+        // If the DOM-derived selection is *longer* than the visible selection text
+        // (e.g. due to zero-width layout characters), allow shrinking to match.
+        const expectedEnd = Math.min(docLen, start! + sanitizedSelectedText.length)
+        if (end! > expectedEnd) end = expectedEnd
       }
 
       // Trim trailing newline characters from the visible selection so that
@@ -656,64 +671,50 @@ function renderWithSpans(
   const elements: ReactNode[] = []
   let lastEnd = 0;
 
-  if (!records.length && (!text || text.length === 0)) {
-    elements.push(
-      <div className="record-span trivia" key={0}>
-        <span className="sub-entity-span trivia">
-          <span className="field-span trivia trivia-placeholder">​</span>
-        </span>
-      </div>
-    )
-  }
-
   for (const [idx, record] of records.entries()) {
     // Add text before this record
     if (lastEnd < record.fileStart) {
-      const gapText = text.slice(lastEnd, record.fileStart)
-      // Skip single-newline gaps to avoid noisy trivia spans between records
-      if (!(gapText === '\n' || gapText === '\r' || gapText === '\r\n')) {
-        elements.push(
-          <span key={`text-${lastEnd}`} className="record-span trivia leading">
-            <span className="sub-entity-span trivia">
-              <span className="field-span trivia" data-file-start={lastEnd} data-file-end={record.fileStart}>
-                {gapText}
-              </span>
-            </span>
-          </span>
-        )
-      }
+      elements.push(
+        renderRawText(text, lastEnd, record.fileStart, `text-${lastEnd}`)
+      )
     }
 
-    // Render the record with its nested spans as a block element
+    // Some decoded records can be "zero-length" in file offsets (fileStart === fileEnd),
+    // which happens when the record corresponds to a blank line (line length 0).
+    // In the underlying text that blank line is represented by the newline separator
+    // character(s). Ensure this record consumes that newline so:
+    // - the record has non-zero rendered height, and
+    // - we don't render the same newline again as part of the inter-record gap text.
+    let effectiveFileEnd = record.fileEnd
+    if (effectiveFileEnd === record.fileStart) {
+      const two = text.slice(effectiveFileEnd, effectiveFileEnd + 2)
+      if (two === '\r\n') effectiveFileEnd += 2
+      else if (text[effectiveFileEnd] === '\n' || text[effectiveFileEnd] === '\r') effectiveFileEnd += 1
+    }
+    effectiveFileEnd = Math.max(record.fileStart, Math.min(text.length, effectiveFileEnd))
+
+    // Render the record as a block so the outline consistently encloses the
+    // full record contents.
     elements.push(
       <div
-        key={`record-${record.startLine}-${record.endLine}-${record.fileStart}-${record.fileEnd}-${idx}`}
+        key={`record-${record.startLine}-${record.endLine}-${record.fileStart}-${effectiveFileEnd}-${idx}`}
         className="record-span"
         data-file-start={record.fileStart}
-        data-file-end={record.fileEnd}
+        data-file-end={effectiveFileEnd}
       >
-        {renderSubEntities(text, record.subEntities, record.fileStart, record.fileEnd, hoverState, setHoverState)}
+        {renderSubEntities(text, record.subEntities, record.fileStart, effectiveFileEnd, hoverState, setHoverState)}
       </div>
     )
 
     // Set lastEnd to record.fileEnd (exclusive) so we can consistently compute gaps
-    lastEnd = record.fileEnd
+    lastEnd = effectiveFileEnd
   }
 
   // Add remaining text
   if (lastEnd < text.length) {
-    const gapText = text.slice(lastEnd)
-    if (!(gapText === '\n' || gapText === '\r' || gapText === '\r\n')) {
-      elements.push(
-        <span key={`text-${lastEnd}`} className="record-span trivia trailing">
-          <span className="sub-entity-span trivia">
-            <span className="field-span trivia">
-              {gapText}
-            </span>
-          </span>
-        </span>
-      )
-    }
+    elements.push(
+      renderRawText(text, lastEnd, text.length, `text-${lastEnd}`)
+    )
   }
 
   return elements
@@ -730,28 +731,12 @@ function renderSubEntities(
   const elements: ReactNode[] = []
   let lastEnd = recordStart
 
-  if (recordStart === recordEnd) {
-    elements.push(
-      <span className="sub-entity-span trivia" key={0}>
-        <span className="field-span trivia trivia-placeholder">​</span>
-      </span>
-    )
-  }
-
   for (const subEntity of subEntities) {
     // Add text before this sub-entity
     if (lastEnd < subEntity.fileStart) {
-      const gapText = text.slice(lastEnd, subEntity.fileStart)
-      // Skip single-newline gaps to avoid creating noisy extra sub-entity spans
-      if (!(gapText === '\n' || gapText === '\r' || gapText === '\r\n')) {
-        elements.push(
-          <span key={`text-${lastEnd}`} className="sub-entity-span trivia leading">
-            <span className="field-span trivia" data-file-start={lastEnd} data-file-end={subEntity.fileStart}>
-              {gapText}
-            </span>
-          </span>
-        )
-      }
+      elements.push(
+        renderRawText(text, lastEnd, subEntity.fileStart, `text-${lastEnd}`)
+      )
     }
 
     const spanId = `sub-entity-${subEntity.fileStart}-${subEntity.fileEnd}`
@@ -779,16 +764,9 @@ function renderSubEntities(
 
   // Add remaining text within the record (after all subEntities)
   if (lastEnd < recordEnd) {
-    const gapText = text.slice(lastEnd, recordEnd)
-    if (!(gapText === '\n' || gapText === '\r' || gapText === '\r\n')) {
-      elements.push(
-        <span key={`text-${lastEnd}`} className="sub-entity-span trivia trailing">
-          <span className="field-span trivia" data-file-start={lastEnd} data-file-end={recordEnd}>
-            {gapText}
-          </span>
-        </span>
-      )
-    }
+    elements.push(
+      renderRawText(text, lastEnd, recordEnd, `text-${lastEnd}`)
+    )
   }
 
   return elements
@@ -816,7 +794,7 @@ function renderFields(
     // Add text before this field
     if (lastEnd < field.fileStart) {
       elements.push(
-        <span key={`text-${lastEnd}`} className="field-span trivia leading" data-file-start={lastEnd} data-file-end={field.fileStart}>{text.slice(lastEnd, field.fileStart)}</span>
+        renderRawText(text, lastEnd, field.fileStart, `text-${lastEnd}`)
       )
     }
 
@@ -848,7 +826,7 @@ function renderFields(
   // Add remaining text within the sub-entity (after all fields)
   if (lastEnd < subEntityEnd) {
     elements.push(
-      <span key={`text-${lastEnd}`} className="field-span trivia trailing" data-file-start={lastEnd} data-file-end={subEntityEnd}>{text.slice(lastEnd, subEntityEnd)}</span>
+      renderRawText(text, lastEnd, subEntityEnd, `text-${lastEnd}`)
     )
   }
 

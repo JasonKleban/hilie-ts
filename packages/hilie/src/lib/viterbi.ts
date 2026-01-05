@@ -812,6 +812,11 @@ export function decodeJointSequenceWithFeedback(
     return s.spans.findIndex(x => x.start === start && x.end === end);
   }
 
+  function spanRangesOverlap(aStart: number, aEnd: number, bStart: number, bEnd: number) {
+    // Treat spans as half-open intervals [start, end)
+    return !(aEnd <= bStart || aStart >= bEnd);
+  }
+
   // Apply feedback span add/remove operations and build forced label map
   const labelMap: Record<string, FieldLabel> = {}; // key = `${line}:${start}-${end}`
 
@@ -830,6 +835,16 @@ export function decodeJointSequenceWithFeedback(
       }
 
       // add/assert: ensure the span exists
+      if (f.start !== undefined && f.end !== undefined) {
+        // Remove overlaps to keep candidate spans non-overlapping.
+        const line = spansCopy[li] ?? { lineIndex: li, spans: [] };
+        line.spans = line.spans.filter(sp => {
+          if (sp.start === f.start && sp.end === f.end) return true;
+          return !spanRangesOverlap(sp.start, sp.end, f.start!, f.end!);
+        });
+        spansCopy[li] = line;
+      }
+
       const idx = findSpanIndex(li, f.start, f.end);
       if (idx < 0 && f.start !== undefined && f.end !== undefined) {
         spansCopy[li]!.spans.push({ start: f.start, end: f.end });
@@ -986,6 +1001,11 @@ export function updateWeightsFromUserFeedback(
     return s.spans.findIndex(x => x.start === start && x.end === end);
   }
 
+  function spanRangesOverlap(aStart: number, aEnd: number, bStart: number, bEnd: number) {
+    // Treat spans as half-open intervals [start, end)
+    return !(aEnd <= bStart || aStart >= bEnd);
+  }
+
   for (const ent of feedbackEntities ?? []) {
     const entStartLine = ent.startLine ?? null;
 
@@ -1004,6 +1024,18 @@ export function updateWeightsFromUserFeedback(
         if (f.confidence !== undefined) confs.push(f.confidence);
       } else {
         // add or assert: ensure span exists
+        if (f.start !== undefined && f.end !== undefined) {
+          // Remove any overlapping spans so we don't end up with overlapping
+          // candidate spans for the same line (which can cause duplicated
+          // rendered text and makes state alignment ambiguous).
+          const line = spansCopy[li] ?? { lineIndex: li, spans: [] };
+          line.spans = line.spans.filter(sp => {
+            if (sp.start === f.start && sp.end === f.end) return true;
+            return !spanRangesOverlap(sp.start, sp.end, f.start!, f.end!);
+          });
+          spansCopy[li] = line;
+        }
+
         const idx = findSpanIndex(li, f.start, f.end);
         if (idx < 0) {
           // insert and keep sorted

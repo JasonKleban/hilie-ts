@@ -91,20 +91,12 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = []) {
       const endLine = entry.endLine
       keptRecords = keptRecords.filter(r => !rangesOverlap(r.startLine, r.endLine, startLine, endLine))
       keptRecords.push({ startLine, endLine })
-      // After record updates, sub-entities must be contained within some record.
-      if (keptRecords.length) {
-        keptSubEntities = keptSubEntities.filter(se => keptRecords.some(r => isContained(se.startLine, se.endLine, r.startLine, r.endLine)))
-      }
       continue
     }
 
     if (entry.kind === 'subEntity') {
       const startLine = entry.startLine
       const endLine = entry.endLine
-      // If records exist, sub-entities must be contained within a record.
-      if (keptRecords.length && !keptRecords.some(r => isContained(startLine, endLine, r.startLine, r.endLine))) {
-        continue
-      }
       keptSubEntities = keptSubEntities.filter(se => !rangesOverlap(se.startLine, se.endLine, startLine, endLine))
       keptSubEntities.push({ startLine, endLine, entityType: entry.entityType })
       continue

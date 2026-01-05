@@ -128,8 +128,8 @@
   outline: 1px solid rgba(100, 108, 255, 0.4);
   outline-offset: -1px;
   border-radius: 2px;
-  padding: 3px 3px;
-  margin: 6px;
+  padding: 3px 2px;
+  margin: 0 -2px;
   display: block;
   background-color: rgba(100, 108, 255, 0.03);
   width: fit-content;
@@ -187,6 +187,8 @@
 .trivia {
   border-color: transparent;
   background-color: transparent;
+  outline: none;
+  box-shadow: none;
 }
 
 /* Only placeholder trivia (zero-width placeholders) should be non-selectable */

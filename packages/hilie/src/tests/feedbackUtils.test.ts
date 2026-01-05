@@ -313,6 +313,150 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   console.log('✓ case1 asserted record with Guardian sub-entity does not split')
 }
 
+function testCase1SubEntityOutsideRecordAssertionIsApplied() {
+  // locate case1.txt relative to common run directories
+  let filePath = path.join(process.cwd(), 'src', 'tests', 'data', 'case1.txt')
+  if (!existsSync(filePath)) filePath = path.join(process.cwd(), 'packages', 'hilie', 'src', 'tests', 'data', 'case1.txt')
+  assert(Boolean(existsSync(filePath)), `case1.txt not found at ${filePath}`)
+
+  // Match demo behavior: normalize line endings and keep blank/whitespace-only lines.
+  const txt = readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = txt.split('\n')
+
+  const weights: any = {
+    'line.indentation_delta': 0.5,
+    'line.lexical_similarity_drop': 1.0,
+    'line.blank_line': 1.0,
+    'segment.token_count_bucket': 0.8,
+    'segment.numeric_ratio': 1.2,
+    'segment.is_email': 2.0,
+    'segment.is_phone': 1.5,
+    'field.relative_position_consistency': 0.6,
+    'field.optional_penalty': -0.4
+  }
+
+  const spans = spanGenerator(lines, {})
+  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
+
+  // This mirrors the reported payload:
+  // - assert the Oliver Smith record (10-18)
+  // - assert Guardian in that record (15-18)
+  // - ALSO assert Guardian in the *previous* record (5-8) without explicitly asserting that record
+  const feedback = {
+    entries: [
+      { kind: 'record', startLine: 10, endLine: 18 },
+      { kind: 'subEntity', startLine: 15, endLine: 18, entityType: 'Guardian' },
+      { kind: 'subEntity', startLine: 5, endLine: 8, entityType: 'Guardian' }
+    ]
+  } as any
+
+  const res = updateWeightsFromUserFeedback(
+    lines,
+    spans,
+    predBefore,
+    feedback,
+    { ...weights },
+    boundaryFeatures,
+    segmentFeatures,
+    householdInfoSchema,
+    1.0,
+    { maxStates: 512, safePrefix: 6 }
+  )
+
+  // Record assertion should enforce boundaries for 10-18.
+  assert(Boolean(res.pred[10] && res.pred[10]!.boundary === 'B'), 'asserted record (10-18) should start with B at line 10')
+  for (let li = 11; li <= 18; li++) {
+    assert(Boolean(res.pred[li] && res.pred[li]!.boundary !== 'B'), `asserted record (10-18) should not contain B inside; found B at line ${li}`)
+  }
+  assert(Boolean(res.pred[19] && res.pred[19]!.boundary === 'B'), 'asserted record (10-18) should force boundary at line 19 (end+1)')
+
+  // Sub-entity assertions should apply even when they are outside any explicit record assertion.
+  for (let li = 5; li <= 8; li++) {
+    assert(Boolean(res.pred[li] && res.pred[li]!.entityType === 'Guardian'), `line ${li} should be Guardian due to sub-entity assertion outside explicit record`) 
+  }
+  for (let li = 15; li <= 18; li++) {
+    assert(Boolean(res.pred[li] && res.pred[li]!.entityType === 'Guardian'), `line ${li} should be Guardian due to sub-entity assertion inside asserted record`) 
+  }
+
+  console.log('✓ case1 sub-entity assertions apply outside record assertions')
+}
+
+function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
+  let filePath = path.join(process.cwd(), 'src', 'tests', 'data', 'case1.txt')
+  if (!existsSync(filePath)) filePath = path.join(process.cwd(), 'packages', 'hilie', 'src', 'tests', 'data', 'case1.txt')
+  assert(Boolean(existsSync(filePath)), `case1.txt not found at ${filePath}`)
+
+  const txt = readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = txt.split('\n')
+
+  const weights: any = {
+    'line.indentation_delta': 0.5,
+    'line.lexical_similarity_drop': 1.0,
+    'line.blank_line': 1.0,
+    'segment.token_count_bucket': 0.8,
+    'segment.numeric_ratio': 1.2,
+    'segment.is_email': 2.0,
+    'segment.is_phone': 1.5,
+    'field.relative_position_consistency': 0.6,
+    'field.optional_penalty': -0.4
+  }
+
+  const spans = spanGenerator(lines, {})
+  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
+
+  const feedback = {
+    entries: [
+      {
+        kind: 'field',
+        field: {
+          action: 'add',
+          lineIndex: 17,
+          start: 4,
+          end: 27,
+          fieldType: 'Email',
+          confidence: 1
+        }
+      },
+      { kind: 'subEntity', startLine: 15, endLine: 18, entityType: 'Guardian' }
+    ]
+  } as any
+
+  const res = updateWeightsFromUserFeedback(
+    lines,
+    spans,
+    predBefore,
+    feedback,
+    { ...weights },
+    boundaryFeatures,
+    segmentFeatures,
+    householdInfoSchema,
+    1.0,
+    { maxStates: 512, safePrefix: 6 }
+  )
+
+  const lineSpans = (res.spansPerLine ?? spans)[17]!.spans
+  // Assert span exists exactly once
+  const matches = lineSpans.filter(s => s.start === 4 && s.end === 27)
+  assert(matches.length === 1, `expected asserted Email span (4-27) to exist once on line 17; got ${matches.length}`)
+
+  // Assert spans are non-overlapping on that line (sorted by start)
+  const sorted = [...lineSpans].sort((a, b) => a.start - b.start || a.end - b.end)
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1]!
+    const curr = sorted[i]!
+    assert(prev.end <= curr.start, `expected non-overlapping spans on line 17; found overlap ${prev.start}-${prev.end} with ${curr.start}-${curr.end}`)
+  }
+
+  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, res.pred, res.updated, segmentFeatures, householdInfoSchema)
+  const recWithGuardian = records.find(r => (r.subEntities ?? []).some(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17))
+  assert(Boolean(recWithGuardian), 'expected to find a record containing Guardian sub-entity covering line 17')
+  const guardian = (recWithGuardian!.subEntities ?? []).find(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17)!
+  const emailFields = guardian.fields.filter(f => f.lineIndex === 17 && f.start === 4 && f.end === 27 && f.fieldType === 'Email')
+  assert(emailFields.length === 1, `expected exactly one Email field span on line 17 (4-27); got ${emailFields.length}`)
+
+  console.log('✓ case1 Email assertion does not create overlapping spans')
+}
+
 // Additional robustness tests to prevent overfitting to case1
 function testFirstTwoCase3Records() {
   let filePath = path.join(process.cwd(), 'src', 'tests', 'data', 'case3.txt')
@@ -391,6 +535,8 @@ testFirstTwoCase1Records()
 testSingleCase1RecordRangeTerminates()
 testAssertedRangesNotSubdivided()
 testCase1RecordWithGuardianSubEntityDoesNotSplit()
+testCase1SubEntityOutsideRecordAssertionIsApplied()
+testCase1EmailAssertionDoesNotCreateOverlappingSpans()
 testFirstTwoCase3Records()
 testFirstTwoCase4Records()
 
