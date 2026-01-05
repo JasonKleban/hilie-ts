@@ -63,13 +63,9 @@ export function enumerateStates(
     safePrefix: opts?.safePrefix ?? 8,
     maxStates: opts?.maxStates ?? 2048,
     whitespaceSpanIndices: opts?.whitespaceSpanIndices ?? new Set<number>(),
-    forcedLabelsByLine: opts?.forcedLabelsByLine ?? {}
+    forcedLabelsByLine: opts?.forcedLabelsByLine ?? {},
+    forcedBoundariesByLine: opts?.forcedBoundariesByLine ?? {}
   };
-
-  // Build field list from schema (excluding NOISE)
-  const fieldLabels = schema.fields.map(f => f.name);
-  const noiseLabel = schema.noiseLabel;
-
   // Build repeatability set and per-field limits from schema
   const repeatable = new Set<FieldLabel>();
   const fieldMaxAllowed = new Map<FieldLabel, number>();
@@ -81,6 +77,10 @@ export function enumerateStates(
       repeatable.add(field.name);
     }
   }
+
+  // Build field list from schema (excluding NOISE)
+  const fieldLabels = schema.fields.map(f => f.name);
+  const noiseLabel = schema.noiseLabel;
 
   // To avoid exponential blowup, only enumerate over an initial prefix when the span count is large.
   const SAFE_PREFIX = enumerateOpts.safePrefix;
@@ -109,8 +109,13 @@ export function enumerateStates(
       // if we limited to a prefix, fill remaining positions with NOISE
       const tail = spans.spans.slice(prefixLen).map(() => noiseLabel);
       // Push states but guard against exceeding the cap
+      const forcedBoundary = enumerateOpts.forcedBoundariesByLine?.[spans.lineIndex ?? -1];
+    if (forcedBoundary !== undefined) {
+      if (states.length < enumerateOpts.maxStates) states.push({ boundary: forcedBoundary as BoundaryState, fields: [...(acc as any), ...tail] });
+    } else {
       if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
       if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
+    }
       return;
     }
 
@@ -906,6 +911,23 @@ export function updateWeightsFromUserFeedback(
     if (ent.startLine !== undefined) boundarySet.add(ent.startLine);
   }
 
+  // Build forced boundary map from explicit entity ranges. If an entity
+  // asserts a startLine we force that line to be 'B'. If the entity provides
+  // an endLine we force interior lines to be 'C'. If endLine is omitted we
+  // assume the entity runs to the end of the document and force subsequent
+  // lines to 'C' as well. This ensures asserting a multi-line record without
+  // an explicit end still prevents the decoder from starting records inside it.
+  const forcedBoundariesByLine: Record<number, BoundaryState> = {};
+  for (const ent of feedback.entities ?? []) {
+    if (ent.startLine !== undefined) {
+      forcedBoundariesByLine[ent.startLine] = 'B';
+      const lastLine = (ent.endLine !== undefined && ent.endLine >= ent.startLine) ? ent.endLine : (spansCopy.length - 1);
+      for (let li = ent.startLine + 1; li <= lastLine; li++) {
+        forcedBoundariesByLine[li] = 'C';
+      }
+    }
+  }
+
   // Build forced label map for enumeration so that states containing asserted labels
   // are allowed and preferred by the decoder. Keyed by line -> { "start-end": label }
   const forcedLabelsByLine: Record<number, Record<string, FieldLabel>> = {};
@@ -919,7 +941,10 @@ export function updateWeightsFromUserFeedback(
   }
 
   // Merge forcedLabelsByLine into enumeration options so enumerateStates can use them
-  const finalEnumerateOpts = { ...effEnumerateOpts, forcedLabelsByLine } as EnumerateOptions;
+  const finalEnumerateOpts = { ...effEnumerateOpts, forcedLabelsByLine, forcedBoundariesByLine } as EnumerateOptions;
+  // Also prepare an enumeration options object that includes forced boundaries/labels
+  // for any subsequent decoding steps (targeted nudges, enforcement loops).
+  const enumerateOptsWithForces = finalEnumerateOpts;
 
   for (let li = 0; li < spansCopy.length; li++) {
     const lineSp = spansCopy[li] ?? { lineIndex: li, spans: [] };
@@ -939,7 +964,7 @@ export function updateWeightsFromUserFeedback(
         fields.push(predLabel);
       }
     }
-    const boundary: BoundaryState = boundarySet.has(li) ? 'B' : (jointSeq[li] ? jointSeq[li]!.boundary : 'C');
+    const boundary: BoundaryState = (forcedBoundariesByLine[li] as BoundaryState) ?? (boundarySet.has(li) ? 'B' : (jointSeq[li] ? jointSeq[li]!.boundary : 'C'));
     const entityType = entityTypeMap[li] ?? (jointSeq[li] ? jointSeq[li]!.entityType : undefined);
     if (entityType !== undefined) {
       gold.push({ boundary, fields, entityType });
@@ -948,12 +973,32 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
-  // Re-run prediction on the augmented spans (use finalEnumerateOpts that include forced labels)
-  let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
+  // Re-run prediction on the augmented spans *without* forced labels first so
+  // we can compute vPred for the current model (unforced) versus vGold which
+  // encodes user-asserted labels. This yields a non-zero delta to update
+  // weights when the asserted label differs from the model's current prediction.
+  const predUnforced = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
 
   // extract feature vectors
   const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeaturesArg, segmentFeaturesArg, schema);
-  const vPred = extractJointFeatureVector(lines, spansCopy, pred, boundaryFeaturesArg, segmentFeaturesArg, schema);
+  const vPred = extractJointFeatureVector(lines, spansCopy, predUnforced, boundaryFeaturesArg, segmentFeaturesArg, schema);
+
+  // After weight updates we will re-run a *forced* decode (finalEnumerateOpts)
+  // so that any asserted labels are reflected in the returned prediction.
+  let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
+
+  // Debug: log phone feature contributions when a Phone assertion is present
+  const assertedFieldsList = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+  const phoneAsserted = assertedFieldsList.some(f => f.fieldType === 'Phone');
+  const emailAsserted = assertedFieldsList.some(f => f.fieldType === 'Email');
+  if (phoneAsserted) {
+    // eslint-disable-next-line no-console
+    console.log('DBG updateWeights: vGold.segment.is_phone=', vGold['segment.is_phone'], 'vPred.segment.is_phone=', vPred['segment.is_phone']);
+  }
+  if (emailAsserted) {
+    // eslint-disable-next-line no-console
+    console.log('DBG updateWeights: vGold.segment.is_email=', vGold['segment.is_email'], 'vPred.segment.is_email=', vPred['segment.is_email']);
+  }
 
   // apply scaled update: w += lr * meanConf * (vGold - vPred)
   const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)]);
@@ -1077,10 +1122,13 @@ export function updateWeightsFromUserFeedback(
     if (!f) return;
     const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
     const si = (spansCopy[li]?.spans ?? []).findIndex(x => x.start === f.start && x.end === f.end);
+    // Debug: log si for observation
+    // eslint-disable-next-line no-console
+    console.log('DBG tryNudge: found asserted field', targetLabel, 'li', li, 'si', si);
     if (si < 0) return;
 
-    // If already predicted as target, nothing to do
-    const currLabel = pred[li] && pred[li]!.fields && pred[li]!.fields[si] ? pred[li]!.fields[si] : schema.noiseLabel;
+    // If already predicted as target *by the underlying (unforced) model*, nothing to do
+    const currLabel = predUnforced[li] && predUnforced[li]!.fields && predUnforced[li]!.fields[si] ? predUnforced[li]!.fields[si] : schema.noiseLabel;
     if (currLabel === targetLabel) return;
 
     // Compute score for target and current label under current weights
@@ -1119,7 +1167,22 @@ export function updateWeightsFromUserFeedback(
     const scoreTarget = scoreWithWeights(weights, targetLabel);
     const scoreCurr = scoreWithWeights(weights, currLabel as FieldLabel);
 
-    if (scoreTarget > scoreCurr) return; // already favored
+    // Debug: log nudge attempt metrics
+    // eslint-disable-next-line no-console
+    console.log('DBG tryNudge', featureId, targetLabel, 'li', li, 'si', si, 'curr', currLabel, 'scoreTarget', scoreTarget, 'scoreCurr', scoreCurr);
+
+    if (scoreTarget > scoreCurr) {
+      if (currLabel === targetLabel) return; // already favored and predicted
+      // If the target scores higher than the current label but the decoder
+      // still didn't choose it (due to joint/global constraints), apply a
+      // small corrective nudge to help break ties or overcome linkage.
+      const beforeSmall = weights[featureId] ?? 0;
+      const smallNud = 0.5 * learningRate * meanConf;
+      weights[featureId] = beforeSmall + smallNud;
+      // eslint-disable-next-line no-console
+      console.log('DBG tryNudge applied small corrective nudge', featureId, 'before', beforeSmall, 'after', weights[featureId], 'nud', smallNud);
+      // continue with full slope estimation below
+    }
 
     // numerical slope estimation: increase feature by 1 and see score change
     const base = weights[featureId] ?? 0;
@@ -1134,7 +1197,10 @@ export function updateWeightsFromUserFeedback(
     if (slope > 1e-9) {
       const needed = (scoreCurr - scoreTarget + 1e-6) / slope;
       const nud = Math.max(needed, 0.5) * learningRate * meanConf; // at least small nudge
-      weights[featureId] = (weights[featureId] ?? 0) + nud;
+      const before = weights[featureId] ?? 0;
+      weights[featureId] = before + nud;
+      // eslint-disable-next-line no-console
+      console.log('DBG tryNudge applied slope nudge', featureId, 'before', before, 'after', weights[featureId], 'nud', nud);
     } else {
       // try to find an alternative feature that actually moves the target vs current gap
       let bestFeat: string | null = null;
@@ -1152,21 +1218,27 @@ export function updateWeightsFromUserFeedback(
       if (bestFeat && bestSlope > 1e-9) {
         const needed = (scoreCurr - scoreTarget + 1e-6) / bestSlope;
         const nud = Math.max(needed, 0.5) * learningRate * meanConf;
-        weights[bestFeat] = (weights[bestFeat] ?? 0) + nud;
+        const before = weights[bestFeat] ?? 0;
+        weights[bestFeat] = before + nud;
+        // eslint-disable-next-line no-console
+        console.log('DBG tryNudge applied alt-feature nudge', bestFeat, 'before', before, 'after', weights[bestFeat], 'nud', nud);
       } else {
         // fallback large nudge on original feature
-        weights[featureId] = (weights[featureId] ?? 0) + learningRate * meanConf * 8.0;
+        const before = weights[featureId] ?? 0;
+        weights[featureId] = before + learningRate * meanConf * 8.0;
+        // eslint-disable-next-line no-console
+        console.log('DBG tryNudge applied fallback nudge', featureId, 'before', before, 'after', weights[featureId]);
       }
     }
 
     // re-run prediction on spansCopy to update pred
-    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOptsWithForces);
     for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
   }
 
   // Ensure asserted labels become stable predictions by nudging associated features
   function enforceAssertedPredictions(): JointSequence {
-    let predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+    let predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOptsWithForces);
 
     for (let iter = 0; iter < 2; iter++) {
       let changed = false;
@@ -1198,6 +1270,9 @@ export function updateWeightsFromUserFeedback(
   }
 
   // Try targeted nudges for asserted detectors
+  // Debug: log that we're about to try nudging key detectors
+  // eslint-disable-next-line no-console
+  console.log('DBG tryNudge calls: phone/email/extid');
   tryNudge('segment.is_phone', 'Phone');
   tryNudge('segment.is_email', 'Email');
   tryNudge('segment.is_extid', 'ExtID');

@@ -764,7 +764,7 @@ function renderWithSpans(
   const elements: ReactNode[] = []
   let lastEnd = 0;
 
-  if (!records.length) {
+  if (!records.length && (!text || text.length === 0)) {
     elements.push(
       <div className="record-span trivia" key={0}>
         <span className="sub-entity-span trivia">

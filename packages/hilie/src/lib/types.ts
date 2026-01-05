@@ -85,6 +85,8 @@ export interface EnumerateOptions {
   whitespaceSpanIndices?: Set<number>; // indices of spans that are whitespace-only and should be forced to NOISE
   // Optional per-line forced label map. Keyed by lineIndex -> { "start-end": FieldLabel }
   forcedLabelsByLine?: Record<number, Record<string, FieldLabel>>;
+  // Optional per-line forced boundary map. Keyed by lineIndex -> 'B'|'C'
+  forcedBoundariesByLine?: Record<number, BoundaryState>;
 }
 
 export type EntityType = 'Primary' | 'Guardian' | 'Unknown';
