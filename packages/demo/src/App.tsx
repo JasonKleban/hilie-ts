@@ -147,6 +147,11 @@ function App() {
 
     const feedback = buildFeedback(entH, fH, bS)
 
+    // Always log the unified feedback that will be submitted to the library
+    // (helps validate that entityType assertions are present)
+    // eslint-disable-next-line no-console
+    console.log('Unified feedback to submit:', JSON.stringify(feedback, null, 2))
+
     setIsLoading(true)
     // Suppress the normal re-extraction that runs on weight changes once so the
     // feedback-provided `spansPerLine` survives the immediate weight update.
@@ -311,8 +316,6 @@ function App() {
             segmentFeatures,
             householdInfoSchema
           )
-
-          console.log(extractedRecords);
 
           setRecords(extractedRecords)
         } finally {
@@ -515,8 +518,8 @@ function App() {
     setBoundaryCorrections(newBoundarySet)
 
     // Build and log the exact Feedback object that will be submitted to the library
-    const feedbackToSubmit = buildFeedback(remainingEntities, updatedHistory, newBoundarySet)
-    console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
+    // const feedbackToSubmit = buildFeedback(remainingEntities, updatedHistory, newBoundarySet)
+    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
 
     // Submit unified feedback (entities + fields + boundaries)
     submitUnifiedFeedback(remainingEntities, updatedHistory, newBoundarySet)
@@ -540,7 +543,9 @@ function App() {
     setBoundaryCorrections(newBoundarySet)
 
     // Add to UI-visible entity feedback history (keep endLine for display purposes)
-    const matchedFields = newFieldHist.filter(f => f.lineIndex === startLine)
+    // Include any fields within the asserted range [startLine..endLine] so they are
+    // attached to the entity for display and submission.
+    const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
     const newEntry: EntityFeedback = {
       startLine,
       ...(endLine !== undefined ? { endLine } : {}),
@@ -552,8 +557,8 @@ function App() {
     setFeedbackHistory(newFieldHist)
 
     // Build and log the exact Feedback object that will be submitted to the library
-    const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
-    console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
+    // const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
+    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
 
     // Submit unified feedback (entities + fields + boundaries)
     submitUnifiedFeedback(newEntityHist, newFieldHist, newBoundarySet)
@@ -577,8 +582,12 @@ function App() {
     // Remove conflicts overlapping this range
     const { remainingEntities, newFieldHist, newBoundarySet } = removeEntityConflicts(startLine, endLine)
 
+    // Ensure this asserted sub-entity is registered as a boundary (use startLine)
+    newBoundarySet.add(startLine)
+
     // Record the assertion in UI history (attach any field assertions for display)
-    const matchedFields = newFieldHist.filter(f => f.lineIndex === startLine)
+    // Include any fields that lie on lines within the asserted span [startLine..endLine]
+    const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
     const newEntry: EntityFeedback = {
       startLine,
       ...(endLine !== undefined ? { endLine } : {}),
@@ -591,8 +600,8 @@ function App() {
     setBoundaryCorrections(newBoundarySet)
 
     // Build and log the exact Feedback object that will be submitted to the library
-    const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
-    console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
+    // const feedbackToSubmit = buildFeedback(newEntityHist, newFieldHist, newBoundarySet)
+    // console.log('Submitting feedback to updateWeightsFromUserFeedback:', JSON.stringify(feedbackToSubmit, null, 2))
 
     // Submit unified feedback (entities + fields + boundaries)
     submitUnifiedFeedback(newEntityHist, newFieldHist, newBoundarySet)
@@ -604,12 +613,14 @@ function App() {
     return renderWithSpans(normalizedText, records, hoverState, setHoverState)
   }, [normalizedText, records, hoverState])
 
+  // Ensure the UI shows all known sub-entity types (even if none were decoded)
+  const allKnownSubEntityTypes = ['Primary', 'Guardian'] as const
   const subEntityTypes = useMemo(() => {
-    if (!records) return new Set<string>()
-    const types = new Set<string>()
+    const types = new Set<string>(allKnownSubEntityTypes as unknown as string[])
+    if (!records) return types
     for (const record of records) {
       for (const subEntity of record.subEntities) {
-        types.add(subEntity.entityType ?? "??")
+        if (subEntity.entityType) types.add(subEntity.entityType)
       }
     }
     return types
@@ -678,7 +689,16 @@ function App() {
                           }`}
                           onMouseEnter={() => setHoverState({ type: 'subEntity', value: type })}
                           onMouseLeave={() => setHoverState({ type: null, value: null })}
-                          onClick={() => textSelection ? handleSubEntityAssertion(type) : setSelectedSubEntityType(selectedSubEntityType === type ? null : type)}
+                          onMouseDown={(e) => {
+                            // Prevent losing the DOM selection when clicking the UI so
+                            // the selection remains available in the handler.
+                            if (textSelection) {
+                              e.preventDefault()
+                              handleSubEntityAssertion(type)
+                            } else {
+                              setSelectedSubEntityType(selectedSubEntityType === type ? null : type)
+                            }
+                          }}
                         >
                           {type}
                         </span>
