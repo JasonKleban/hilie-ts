@@ -81,6 +81,10 @@ export interface EnumerateOptions {
   maxStatesPerField?: Record<FieldLabel, number>; // per-field multiplicity caps (replaces maxPhones, maxEmails)
   safePrefix?: number; // how many spans to fully enumerate before tailing with NOISE
   maxStates?: number; // overall state cap to avoid explosion
+  debugFreshDecode?: boolean; // enable diagnostic logging for decoder path selection
+  whitespaceSpanIndices?: Set<number>; // indices of spans that are whitespace-only and should be forced to NOISE
+  // Optional per-line forced label map. Keyed by lineIndex -> { "start-end": FieldLabel }
+  forcedLabelsByLine?: Record<number, Record<string, FieldLabel>>;
 }
 
 export type EntityType = 'Primary' | 'Guardian' | 'Unknown';

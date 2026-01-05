@@ -76,6 +76,45 @@
   padding: 2rem;
   border-right: 1px solid #535bf2;
   background-color: #242424;
+  position: relative;
+}
+
+.feedback-controls {
+  position: sticky;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 1rem;
+  background: rgba(26, 26, 26, 0.95);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid #535bf2;
+  display: flex;
+  gap: 1rem;
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+
+.boundary-button {
+  padding: 0.75rem 1.5rem;
+  background: linear-gradient(135deg, #646cff 0%, #535bf2 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 1em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 2px 8px rgba(100, 108, 255, 0.3);
+}
+
+.boundary-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(100, 108, 255, 0.5);
+}
+
+.boundary-button:active {
+  transform: translateY(0);
 }
 
 .rendered-text {
@@ -149,6 +188,17 @@
   background-color: rgba(144, 238, 144, 0.15);
 }
 
+.trivia {
+  border-color: transparent;
+  background-color: transparent;
+}
+
+/* Only placeholder trivia (zero-width placeholders) should be non-selectable */
+.trivia-placeholder {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .right-panel {
   flex: 0 0 25%;
   padding: 2rem;
@@ -195,7 +245,7 @@
   flex-wrap: wrap;
 }
 
-.record-span-legend {
+.record-span-legend, .record-button {
   border: 3px solid rgba(100, 108, 255, 0.4);
   border-radius: 8px;
   padding: 6px 12px;
@@ -209,7 +259,7 @@
   transition: all 0.15s ease;
 }
 
-.record-span-legend.hover-exact {
+.record-span-legend.hover-exact, .record-button.hover-exact, .record-button:hover {
   border-color: rgba(100, 108, 255, 1);
   background-color: rgba(100, 108, 255, 0.2);
   box-shadow: 0 0 8px rgba(100, 108, 255, 0.4);
@@ -352,6 +402,19 @@
   .field-span {
     border-color: rgba(34, 177, 76, 0.5);
     background-color: rgba(34, 177, 76, 0.05);
+  }
+
+  /* Feedback list */
+  .feedback-list ul {
+    margin: 0.25rem 0 0 1rem;
+    padding: 0;
+    color: rgba(255,255,255,0.8);
+    font-size: 0.85em;
+  }
+
+  .feedback-empty {
+    color: rgba(255,255,255,0.45);
+    font-size: 0.85em;
   }
 
   .field-span.hover-exact {

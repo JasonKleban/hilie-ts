@@ -61,7 +61,9 @@ export function enumerateStates(
     maxUniqueFields: opts?.maxUniqueFields ?? 3,
     maxStatesPerField: opts?.maxStatesPerField ?? {},
     safePrefix: opts?.safePrefix ?? 8,
-    maxStates: opts?.maxStates ?? 2048
+    maxStates: opts?.maxStates ?? 2048,
+    whitespaceSpanIndices: opts?.whitespaceSpanIndices ?? new Set<number>(),
+    forcedLabelsByLine: opts?.forcedLabelsByLine ?? {}
   };
 
   // Build field list from schema (excluding NOISE)
@@ -109,6 +111,68 @@ export function enumerateStates(
       // Push states but guard against exceeding the cap
       if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
       if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
+      return;
+    }
+
+    // Check if current span is whitespace-only - if so, force it to NOISE
+    if (enumerateOpts.whitespaceSpanIndices?.has(i)) {
+      // Force whitespace spans to NOISE
+      acc.push(noiseLabel);
+      backtrack(i + 1, acc);
+      acc.pop();
+      return;
+    }
+
+    // If there is a forced label for this exact span (from feedback), only allow that label
+    const forcedForLine = (enumerateOpts.forcedLabelsByLine ?? {})[spans.lineIndex ?? -1] ?? {};
+    const spanKey = `${spans.spans[i]!.start}-${spans.spans[i]!.end}`;
+    const forcedLabel = forcedForLine[spanKey];
+    if (forcedLabel !== undefined) {
+      // Only include the forced label (if schema contains it) or NOISE if it is the noise label
+      if (forcedLabel === noiseLabel) {
+        acc.push(noiseLabel);
+        backtrack(i + 1, acc);
+        acc.pop();
+        return;
+      }
+      // If forcedLabel is known in fieldLabels, accept it, otherwise fallback to noise
+      if (!fieldLabels.includes(forcedLabel)) {
+        acc.push(noiseLabel);
+        backtrack(i + 1, acc);
+        acc.pop();
+        return;
+      }
+
+      // Only attempt the forced label
+      const f = forcedLabel;
+      // enforce caps and per-field limits still apply
+      const nonNoiseCount = distinctNonNoiseCount(acc);
+      if (f !== noiseLabel && !repeatable.has(f) && acc.includes(f)) {
+        // Can't add duplicate single-occurrence field; fall back to NOISE
+        acc.push(noiseLabel);
+        backtrack(i + 1, acc);
+        acc.pop();
+        return;
+      }
+
+      if (f !== noiseLabel && !acc.includes(f) && nonNoiseCount >= enumerateOpts.maxUniqueFields) {
+        acc.push(noiseLabel);
+        backtrack(i + 1, acc);
+        acc.pop();
+        return;
+      }
+
+      const fieldLimit = enumerateOpts.maxStatesPerField[f] ?? (fieldMaxAllowed.get(f) ?? 1);
+      if (f !== noiseLabel && countOccurrences(acc, f) >= fieldLimit) {
+        acc.push(noiseLabel);
+        backtrack(i + 1, acc);
+        acc.pop();
+        return;
+      }
+
+      acc.push(f);
+      backtrack(i + 1, acc);
+      acc.pop();
       return;
     }
 
@@ -179,8 +243,20 @@ export function decodeJointSequence(
   const stateSpaces: JointState[][] = [];
 
   // Precompute state spaces
-  for (const spans of spansPerLine) {
-    stateSpaces.push(enumerateStates(spans, schema, enumerateOpts));
+  for (let t = 0; t < spansPerLine.length; t++) {
+    const spans = spansPerLine[t]!;
+    
+    // Identify whitespace-only spans to force them to NOISE during enumeration
+    const whitespaceSpanIndices = new Set<number>();
+    for (let i = 0; i < spans.spans.length; i++) {
+      const span = spans.spans[i]!;
+      const spanText = lines[t]?.slice(span.start, span.end) ?? '';
+      if (/^\s*$/.test(spanText)) {
+        whitespaceSpanIndices.add(i);
+      }
+    }
+    
+    stateSpaces.push(enumerateStates(spans, schema, { ...enumerateOpts, whitespaceSpanIndices }));
   }
 
   // Precompute boundary feature contributions (per-line) and per-span segment feature caches to avoid repeated expensive computations
@@ -248,12 +324,7 @@ export function decodeJointSequence(
         const label = s.fields[k];
         const txt: string = spanTextCache[t]?.[k] ?? '';
         
-        // Whitespace-only spans should always be NOISE - heavily penalize non-NOISE labels
-        const isWhitespace = /^\s*$/.test(txt);
-        if (isWhitespace && label !== schema.noiseLabel) {
-          fcontrib -= 100; // Large penalty for labeling whitespace as non-NOISE
-          continue;
-        }
+        // Whitespace spans are already forced to NOISE during enumeration, so no penalty needed here
         
         if (label === schema.noiseLabel) continue;
         const featsRec: Record<string, number> = spanFeatureCache[t]?.[k] ?? {};
@@ -736,7 +807,7 @@ export function updateWeightsFromUserFeedback(
   learningRate = 1.0,
   enumerateOpts?: EnumerateOptions,
   stabilizationFactor = 0.15
-): { updated: Record<string, number>; pred: JointSequence } {
+): { updated: Record<string, number>; pred: JointSequence; spansPerLine?: LineSpans[] } {
   // Clone spans so we can modify
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({ lineIndex: s.lineIndex, spans: s.spans.map(sp => ({ start: sp.start, end: sp.end })) }));
 
@@ -786,6 +857,24 @@ export function updateWeightsFromUserFeedback(
 
   const meanConf = confs.length ? confs.reduce((a,b)=>a+b,0)/confs.length : 1.0;
 
+  // Expand safePrefix when feedback targets spans beyond the default prefix.
+  let maxAssertedSpanIdx = -1;
+  for (const ent of feedback.entities ?? []) {
+    for (const f of ent.fields ?? []) {
+      const li = f.lineIndex ?? ent.startLine;
+      if (li === undefined || li === null) continue;
+      const idx = spansCopy[li]?.spans.findIndex(sp => sp.start === f.start && sp.end === f.end) ?? -1;
+      if (idx > maxAssertedSpanIdx) maxAssertedSpanIdx = idx;
+    }
+  }
+
+  const effEnumerateOpts: EnumerateOptions | undefined = (() => {
+    if (maxAssertedSpanIdx < 0) return enumerateOpts;
+    const safePrefix = Math.max((enumerateOpts?.safePrefix ?? 8), maxAssertedSpanIdx + 1);
+    return { ...enumerateOpts, safePrefix };
+  })();
+
+
   // Build gold JointState[] aligned with spansCopy
   const gold: JointState[] = [];
 
@@ -803,11 +892,34 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
+  // Map explicit entityType assertions (sub-entity type) from feedback
+  const entityTypeMap: Record<number, SubEntityType> = {};
+  for (const ent of feedback.entities ?? []) {
+    if (ent.startLine !== undefined && ent.entityType !== undefined) {
+      entityTypeMap[ent.startLine] = ent.entityType as SubEntityType;
+    }
+  }
+
   // Determine boundary choices: prefer feedback entity starts when provided, otherwise fall back to the provided joint sequence
   const boundarySet = new Set<number>();
   for (const ent of feedback.entities ?? []) {
     if (ent.startLine !== undefined) boundarySet.add(ent.startLine);
   }
+
+  // Build forced label map for enumeration so that states containing asserted labels
+  // are allowed and preferred by the decoder. Keyed by line -> { "start-end": label }
+  const forcedLabelsByLine: Record<number, Record<string, FieldLabel>> = {};
+  for (const [key, lab] of Object.entries(labelMap)) {
+    const [lineStr, range] = key.split(':');
+    if (!range) continue;
+    const lineIdx = Number(lineStr);
+    if (Number.isNaN(lineIdx)) continue;
+    const map = forcedLabelsByLine[lineIdx] ?? (forcedLabelsByLine[lineIdx] = {});
+    map[range] = lab;
+  }
+
+  // Merge forcedLabelsByLine into enumeration options so enumerateStates can use them
+  const finalEnumerateOpts = { ...effEnumerateOpts, forcedLabelsByLine } as EnumerateOptions;
 
   for (let li = 0; li < spansCopy.length; li++) {
     const lineSp = spansCopy[li] ?? { lineIndex: li, spans: [] };
@@ -828,11 +940,16 @@ export function updateWeightsFromUserFeedback(
       }
     }
     const boundary: BoundaryState = boundarySet.has(li) ? 'B' : (jointSeq[li] ? jointSeq[li]!.boundary : 'C');
-    gold.push({ boundary, fields });
+    const entityType = entityTypeMap[li] ?? (jointSeq[li] ? jointSeq[li]!.entityType : undefined);
+    if (entityType !== undefined) {
+      gold.push({ boundary, fields, entityType });
+    } else {
+      gold.push({ boundary, fields });
+    }
   }
 
-  // Re-run prediction on the augmented spans
-  const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts);
+  // Re-run prediction on the augmented spans (use finalEnumerateOpts that include forced labels)
+  let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
 
   // extract feature vectors
   const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeaturesArg, segmentFeaturesArg, schema);
@@ -849,6 +966,15 @@ export function updateWeightsFromUserFeedback(
   // the corresponding weighted delta ended up non-positive, attempt a targeted
   // nudge that is large enough to flip the score for the asserted span.
   const assertedFields = (feedback.entities ?? []).flatMap(e => e.fields ?? []);
+
+  const labelFeatureMap: Record<string, string> = {
+    'Phone': 'segment.is_phone',
+    'Email': 'segment.is_email',
+    'ExtID': 'segment.is_extid',
+    'Name': 'segment.is_name',
+    'PreferredName': 'segment.is_preferred_name',
+    'Birthdate': 'segment.is_birthdate'
+  };
 
   // Special handling for removals: when the user requests removal of a specific
   // span, they intend that span not be predicted anymore. The standard update
@@ -1034,8 +1160,41 @@ export function updateWeightsFromUserFeedback(
     }
 
     // re-run prediction on spansCopy to update pred
-    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts);
+    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
     for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
+  }
+
+  // Ensure asserted labels become stable predictions by nudging associated features
+  function enforceAssertedPredictions(): JointSequence {
+    let predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+
+    for (let iter = 0; iter < 2; iter++) {
+      let changed = false;
+      pred = predLocal;
+
+      for (const f of assertedFields.filter((x: any) => x.action !== 'remove')) {
+        const li = f.lineIndex ?? (feedback.entities && feedback.entities[0] && feedback.entities[0]!.startLine) ?? 0;
+        const spansForLine = spansCopy[li]?.spans ?? [];
+        const idx = spansForLine.findIndex(s => s.start === f.start && s.end === f.end);
+        if (idx < 0) continue;
+        const desired = f.fieldType as FieldLabel | undefined;
+        if (!desired) continue;
+
+        const current = predLocal[li]?.fields?.[idx];
+        if (current === desired) continue;
+
+        const featId = labelFeatureMap[desired];
+        if (featId) {
+          tryNudge(featId, desired);
+          changed = true;
+        }
+      }
+
+      if (!changed) break;
+      predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+    }
+
+    return predLocal;
   }
 
   // Try targeted nudges for asserted detectors
@@ -1115,7 +1274,10 @@ export function updateWeightsFromUserFeedback(
           }
           
           // Apply small positive boost scaled by learning rate and stabilization factor
-          weights[f.id] = (weights[f.id] ?? 0) + learningRate * stabilizationFactor * contrib;
+          // Only apply for positive contributions to avoid decreasing weights
+          if (contrib > 0) {
+            weights[f.id] = (weights[f.id] ?? 0) + learningRate * stabilizationFactor * contrib;
+          }
         }
         
         stabilizationCount++;
@@ -1133,35 +1295,42 @@ export function updateWeightsFromUserFeedback(
     enumerateOpts
   );
 
+  predAfterUpdate = enforceAssertedPredictions();
+
   // Ensure asserted labels are reflected in the returned prediction even if
   // the decoder still disagrees after the weight update. This aligns the
   // immediate output with explicit user intent while the weights continue to
   // adapt over subsequent feedback iterations.
   const labelMapEntries = Object.entries(labelMap);
-  if (labelMapEntries.length > 0) {
-    predAfterUpdate = predAfterUpdate.map((state, li) => {
-      if (!state) return state;
-      const spansForLine = spansCopy[li]?.spans ?? [];
-      const fields = [...(state.fields ?? [])];
-      for (const [key, lab] of labelMapEntries) {
-        const [lineStr, range] = key.split(':');
-        if (!range) continue;
-        const lineIdx = Number(lineStr);
-        if (lineIdx !== li || Number.isNaN(lineIdx)) continue;
-        const [startStr, endStr] = range.split('-');
-        if (!startStr || !endStr) continue;
-        const start = Number(startStr);
-        const end = Number(endStr);
-        const idx = spansForLine.findIndex(s => s.start === start && s.end === end);
-        if (idx >= 0) {
-          while (fields.length <= idx) fields.push(schema.noiseLabel);
-          fields[idx] = lab;
-        }
-      }
-      return { ...state, fields } as JointState;
-    });
-  }
+  // Always apply explicit field labels and entityType assertions to the returned prediction
+  predAfterUpdate = predAfterUpdate.map((state, li) => {
+    if (!state) return state;
+    const spansForLine = spansCopy[li]?.spans ?? [];
+    const fields = [...(state.fields ?? [])];
 
-  return { updated: weights, pred: predAfterUpdate };
+    for (const [key, lab] of labelMapEntries) {
+      const [lineStr, range] = key.split(':');
+      if (!range) continue;
+      const lineIdx = Number(lineStr);
+      if (lineIdx !== li || Number.isNaN(lineIdx)) continue;
+      const [startStr, endStr] = range.split('-');
+      if (!startStr || !endStr) continue;
+      const start = Number(startStr);
+      const end = Number(endStr);
+      const idx = spansForLine.findIndex(s => s.start === start && s.end === end);
+      if (idx >= 0) {
+        while (fields.length <= idx) fields.push(schema.noiseLabel);
+        fields[idx] = lab;
+      }
+    }
+
+    // Also apply any explicit entityType assertions (ensure UI feedback is reflected immediately)
+    const ent = (feedback.entities ?? []).find(e => e.startLine === li && e.entityType !== undefined);
+    const entityType = ent ? ent.entityType : state.entityType;
+
+    return { ...state, fields, entityType } as JointState;
+  });
+
+  return { updated: weights, pred: predAfterUpdate, spansPerLine: spansCopy };
 }
 

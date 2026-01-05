@@ -211,9 +211,50 @@ export function spanGenerator(
       filledSpans.push({ start: 0, end: line.length });
     }
 
+    // Trim leading/trailing whitespace from non-whitespace-only spans
+    // NOISE spans (100% whitespace) are allowed to keep their whitespace
+    const trimmedSpans: Array<{ start: number; end: number }> = [];
+    for (const span of filledSpans) {
+      const text = line.slice(span.start, span.end);
+      const isAllWhitespace = /^\s*$/.test(text);
+      
+      if (isAllWhitespace) {
+        // Keep whitespace-only spans as-is
+        trimmedSpans.push(span);
+      } else {
+        // Trim leading/trailing whitespace from content spans
+        const leadingMatch = text.match(/^\s*/);
+        const trailingMatch = text.match(/\s*$/);
+        const leadingLen = leadingMatch ? leadingMatch[0].length : 0;
+        const trailingLen = trailingMatch ? trailingMatch[0].length : 0;
+        
+        const trimmedStart = span.start + leadingLen;
+        const trimmedEnd = span.end - trailingLen;
+        
+        // Only add if there's content left after trimming
+        if (trimmedStart < trimmedEnd) {
+          trimmedSpans.push({ start: trimmedStart, end: trimmedEnd });
+          
+          // Add back the trimmed whitespace as separate spans
+          if (leadingLen > 0) {
+            trimmedSpans.push({ start: span.start, end: trimmedStart });
+          }
+          if (trailingLen > 0) {
+            trimmedSpans.push({ start: trimmedEnd, end: span.end });
+          }
+        } else {
+          // If trimming removes everything, treat as whitespace span
+          trimmedSpans.push(span);
+        }
+      }
+    }
+
+    // Sort again after trimming created new spans
+    trimmedSpans.sort((a, b) => a.start - b.start);
+
     // Merge adjacent whitespace-only spans greedily (prefer longer contiguous whitespace)
     const mergedSpans: Array<{ start: number; end: number }> = [];
-    for (const span of filledSpans) {
+    for (const span of trimmedSpans) {
       const text = line.slice(span.start, span.end);
       const isWhitespace = /^\s*$/.test(text);
       
