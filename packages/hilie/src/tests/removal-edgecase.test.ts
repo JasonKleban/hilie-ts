@@ -1,7 +1,7 @@
 import { spanGenerator } from '../lib/utils.js';
 import { decodeJointSequence, updateWeightsFromUserFeedback } from '../lib/viterbi.js';
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
-import { householdInfoSchema } from './test.js';
+import { householdInfoSchema } from './test-helpers.js';
 
 const schema = householdInfoSchema;
 const bFeatures = boundaryFeatures;

@@ -4,13 +4,17 @@ import {
   entitiesFromJointSequence,
   spanGenerator,
   updateWeightsFromUserFeedback,
+  buildFeedbackFromHistories,
+  removeEntityConflicts as removeEntityConflictsLib,
   type JointSequence,
   type RecordSpan,
   type SubEntitySpan,
   type FieldSpan,
   type Feedback,
   type FieldAssertion,
-  type LineSpans
+  type LineSpans,
+  type EntityAssertion,
+  type EntityType
 } from 'hilie'
 import { boundaryFeatures, segmentFeatures } from 'hilie'
 import './App.css'
@@ -50,94 +54,28 @@ function App() {
   const [suppressExtractionOnWeightChange, setSuppressExtractionOnWeightChange] = useState(false)
   const [selectedSubEntityType, setSelectedSubEntityType] = useState<string | null>(null)
   // Track entity-level feedback (records / sub-entity assertions) for UI and submission
-  type EntityFeedback = { startLine: number; endLine?: number; entityType?: string; fields?: FieldAssertion[] }
-  const [entityFeedbackHistory, setEntityFeedbackHistory] = useState<EntityFeedback[]>([])
+  const [entityFeedbackHistory, setEntityFeedbackHistory] = useState<EntityAssertion[]>([])
 
   // Build a normalized Feedback object from the UI histories
+  // Use library helper to build canonical Feedback from UI histories
+  // (delegates deduplication, boundary seeding, and field attachment)
   const buildFeedback = (
     entityHist = entityFeedbackHistory,
     fieldHist = feedbackHistory,
     boundarySet = boundaryCorrections
   ): Feedback => {
-    const entitiesMap = new Map<number, { startLine?: number; entityType?: string; fields?: FieldAssertion[] }>()
-
-    // seed from entity assertions and include any entity-attached fields (deduped)
-    const pushUniqueFields = (existingArr: FieldAssertion[] | undefined, incoming: FieldAssertion[] | undefined) => {
-      existingArr = existingArr ?? []
-      if (!incoming || incoming.length === 0) return existingArr
-      for (const f of incoming) {
-        const duplicate = existingArr.some(g => g.lineIndex === f.lineIndex && g.start === f.start && g.end === f.end && g.fieldType === f.fieldType && g.action === f.action)
-        if (!duplicate) existingArr.push(f)
-      }
-      return existingArr
-    }
-
-    for (const e of entityHist) {
-      const existing = entitiesMap.get(e.startLine) ?? { startLine: e.startLine, fields: [] as FieldAssertion[] }
-      if (e.entityType) existing.entityType = e.entityType
-      // merge any fields attached to the entity entry into the canonical fields array
-      if (e.fields && e.fields.length) {
-        existing.fields = pushUniqueFields(existing.fields, e.fields)
-      }
-      entitiesMap.set(e.startLine, existing)
-    }
-
-    // ensure boundary corrections are present
-    for (const li of boundarySet) {
-      const existing = entitiesMap.get(li) ?? { startLine: li, fields: [] as FieldAssertion[] }
-      entitiesMap.set(li, existing)
-    }
-
-    // attach field assertions to their line's entity entry
-    for (const f of fieldHist) {
-      if (f.lineIndex === undefined || f.lineIndex === null) continue
-      const li = f.lineIndex
-      const existing = entitiesMap.get(li) ?? { startLine: li, fields: [] as FieldAssertion[] }
-      existing.fields = pushUniqueFields(existing.fields, [f])
-      entitiesMap.set(li, existing)
-    }
-
-    const entities = Array.from(entitiesMap.values()).map(e => {
-      const out: any = {}
-      if (e.startLine !== undefined) out.startLine = e.startLine
-      if (e.entityType !== undefined) out.entityType = e.entityType
-      if (e.fields && e.fields.length) out.fields = e.fields
-      return out
-    })
-
-    // fallback: if no entities but there are fields (ungrouped), send them as a single entity
-    if (entities.length === 0 && fieldHist.length > 0) {
-      return { entities: [ { fields: fieldHist } ] }
-    }
-
-    return { entities }
+    return buildFeedbackFromHistories(entityHist, fieldHist, boundarySet)
   }
 
   // Remove entity and field conflicts when adding a new entity/sub-entity record
+  // Delegate conflict removal to library helper
   const removeEntityConflicts = (newStart: number, newEnd?: number) => {
-    const end = newEnd ?? newStart
-    const removedLines = new Set<number>()
-    const remainingEntities = entityFeedbackHistory.filter(e => {
-      const es = e.startLine
-      const ee = e.endLine ?? es
-      const overlap = !(ee < newStart || es > end)
-      if (overlap) {
-        for (let i = es; i <= ee; i++) removedLines.add(i)
-        return false
-      }
-      return true
-    })
-    const newFieldHist = feedbackHistory.filter(f => f.lineIndex === undefined || !removedLines.has(f.lineIndex))
-    const newBoundarySet = new Set(boundaryCorrections)
-    for (const li of Array.from(newBoundarySet)) {
-      if (removedLines.has(li)) newBoundarySet.delete(li)
-    }
-    return { remainingEntities, newFieldHist, newBoundarySet }
+    return removeEntityConflictsLib(entityFeedbackHistory, feedbackHistory, boundaryCorrections, newStart, newEnd)
   }
 
   // Submit a unified feedback object to the library and update weights
   const submitUnifiedFeedback = (
-    entityHist?: EntityFeedback[],
+    entityHist?: EntityAssertion[],
     fieldHist?: FieldAssertion[],
     boundarySet?: Set<number>
   ) => {
@@ -492,20 +430,20 @@ function App() {
     const updatedHistory = [...filteredHistory, ...conflictingSpans, newFeedback]
 
     // Ensure entity history includes this field assertion attached to the entity at startLine
-    const newEntityHist: EntityFeedback[] = remainingEntities.map(e => ({
-      startLine: e.startLine,
+    const newEntityHist: EntityAssertion[] = remainingEntities.map(e => ({
+      ...(e.startLine !== undefined ? { startLine: e.startLine } : {}),
       ...(e.endLine !== undefined ? { endLine: e.endLine } : {}),
-      ...(e.entityType !== undefined ? { entityType: e.entityType } : {}),
+      ...(e.entityType !== undefined ? { entityType: e.entityType as EntityType } : {}),
       ...(e.fields ? { fields: e.fields } : {})
     }))
 
     const entIdx = newEntityHist.findIndex(e => e.startLine === startLine)
     if (entIdx >= 0) {
       const existing = newEntityHist[entIdx]!
-      const ent: EntityFeedback = {
-        startLine: existing.startLine,
+      const ent: EntityAssertion = {
+        ...(existing.startLine !== undefined ? { startLine: existing.startLine } : {}),
         ...(existing.endLine !== undefined ? { endLine: existing.endLine } : {}),
-        ...(existing.entityType !== undefined ? { entityType: existing.entityType } : {}),
+        ...(existing.entityType !== undefined ? { entityType: existing.entityType as EntityType } : {}),
         fields: [...(existing.fields ?? []), newFeedback]
       }
       newEntityHist[entIdx] = ent
@@ -546,13 +484,13 @@ function App() {
     // Include any fields within the asserted range [startLine..endLine] so they are
     // attached to the entity for display and submission.
     const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
-    const newEntry: EntityFeedback = {
+    const newEntry: EntityAssertion = {
       startLine,
       ...(endLine !== undefined ? { endLine } : {}),
-      ...(entityType != null ? { entityType } : {}),
+      ...(entityType != null ? { entityType: entityType as EntityType } : {}),
       ...(matchedFields.length ? { fields: matchedFields } : {})
     }
-    const newEntityHist: EntityFeedback[] = [...remainingEntities.map(e => ({ startLine: e.startLine, ...(e.endLine !== undefined ? { endLine: e.endLine } : {}), ...(e.entityType !== undefined ? { entityType: e.entityType } : {}), ...(e.fields ? { fields: e.fields } : {}) })), newEntry]
+    const newEntityHist: EntityAssertion[] = [...remainingEntities.map(e => ({ ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), ...(e.endLine !== undefined ? { endLine: e.endLine } : {}), ...(e.entityType !== undefined ? { entityType: e.entityType as EntityType } : {}), ...(e.fields ? { fields: e.fields } : {}) })), newEntry]
     setEntityFeedbackHistory(newEntityHist)
     setFeedbackHistory(newFieldHist)
 
@@ -588,13 +526,13 @@ function App() {
     // Record the assertion in UI history (attach any field assertions for display)
     // Include any fields that lie on lines within the asserted span [startLine..endLine]
     const matchedFields = newFieldHist.filter(f => f.lineIndex !== undefined && f.lineIndex !== null && f.lineIndex >= startLine && f.lineIndex <= endLine)
-    const newEntry: EntityFeedback = {
+    const newEntry: EntityAssertion = {
       startLine,
       ...(endLine !== undefined ? { endLine } : {}),
-      entityType: type,
+      entityType: type as EntityType,
       ...(matchedFields.length ? { fields: matchedFields } : {})
     }
-    const newEntityHist: EntityFeedback[] = [...remainingEntities.map(e => ({ startLine: e.startLine, ...(e.endLine !== undefined ? { endLine: e.endLine } : {}), ...(e.entityType !== undefined ? { entityType: e.entityType } : {}), ...(e.fields ? { fields: e.fields } : {}) })), newEntry]
+    const newEntityHist: EntityAssertion[] = [...remainingEntities, newEntry]
     setEntityFeedbackHistory(newEntityHist)
     setFeedbackHistory(newFieldHist)
     setBoundaryCorrections(newBoundarySet)
@@ -607,6 +545,12 @@ function App() {
     submitUnifiedFeedback(newEntityHist, newFieldHist, newBoundarySet)
   }
 
+
+  useEffect(() => {
+    if (!records) return;
+
+    console.log(records);
+  }, [records])
 
   const renderedContent = useMemo(() => {
     if (!normalizedText || !records) return null

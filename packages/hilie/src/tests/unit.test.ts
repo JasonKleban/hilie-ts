@@ -3,12 +3,12 @@ import { enumerateStates, decodeJointSequence, updateWeightsFromUserFeedback, en
 import { isLikelyEmail, isLikelyPhone, isLikelyBirthdate, isLikelyExtID, isLikelyName, isLikelyPreferredName } from '../lib/validators.js';
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
 import { defaultWeights } from '../lib/prebuilt.js';
+import { readFileSync } from 'fs';
+import { householdInfoSchema } from './test-helpers.js';
 
 const schema = householdInfoSchema;
 const bFeatures = boundaryFeatures;
 const sFeatures = segmentFeatures;
-import { readFileSync } from 'fs';
-import { householdInfoSchema } from './test.js';
 
 function ok(cond: boolean, msg?: string) {
   if (!cond) throw new Error(msg || 'ok failed');
