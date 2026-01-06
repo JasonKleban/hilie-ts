@@ -131,9 +131,21 @@ export function spanGenerator(
     maxSpansPerLine?: number;
   }
 ): LineSpans[] {
+  return candidateSpanGenerator(lines, options);
+}
+
+export function candidateSpanGenerator(
+  lines: string[],
+  options?: {
+    delimiterRegex?: RegExp;
+    minTokenLength?: number;
+    maxTokensPerSpan?: number;
+    maxPartsPerLine?: number;
+    maxSpansPerLine?: number;
+  }
+): LineSpans[] {
   const delimiterRegex = options?.delimiterRegex ?? detectDelimiter(lines);
   const minTokenLength = options?.minTokenLength ?? 1;
-  const maxTokensPerSpan = options?.maxTokensPerSpan ?? 50;
   const maxPartsPerLine = options?.maxPartsPerLine ?? 50;
   const maxSpansPerLine = options?.maxSpansPerLine ?? 128;
 
@@ -164,8 +176,7 @@ export function spanGenerator(
       if (parts.length >= maxPartsPerLine) break;
     }
 
-    // Generate non-overlapping spans (single parts only to avoid overlap)
-    // Previously this generated all n-grams which created overlapping candidates
+    // Candidate spans: single parts only (avoid overlap)
     for (let i = 0; i < parts.length; i++) {
       const start = parts[i]!.start;
       const end = parts[i]!.end;
@@ -185,57 +196,80 @@ export function spanGenerator(
       }
     }
 
+    // Keep deterministic ordering
+    spans.sort((a, b) => a.start - b.start);
+
+    return { lineIndex, spans: spans.slice(0, maxSpansPerLine) };
+  });
+}
+
+export function coverageSpanGenerator(
+  lines: string[],
+  options?: {
+    delimiterRegex?: RegExp;
+    minTokenLength?: number;
+    maxTokensPerSpan?: number;
+    maxPartsPerLine?: number;
+    maxSpansPerLine?: number;
+  }
+): LineSpans[] {
+  const candidates = candidateSpanGenerator(lines, options);
+  return coverageSpanGeneratorFromCandidates(lines, candidates, options);
+}
+
+export function coverageSpanGeneratorFromCandidates(
+  lines: string[],
+  candidates: LineSpans[],
+  options?: {
+    maxSpansPerLine?: number;
+  }
+): LineSpans[] {
+  const maxSpansPerLine = options?.maxSpansPerLine ?? 128;
+
+  return lines.map((line, lineIndex) => {
+    const spans = (candidates[lineIndex]?.spans ?? []).slice();
+
     // Fill gaps to ensure every character is covered by exactly one span
-    // Sort spans by start position
     spans.sort((a, b) => a.start - b.start);
     const filledSpans: Array<{ start: number; end: number }> = [];
     let pos = 0;
 
     for (const span of spans) {
-      // If there's a gap before this span, create a span to fill it
       if (pos < span.start) {
         filledSpans.push({ start: pos, end: span.start });
       }
-      // Add the content span
       filledSpans.push(span);
       pos = span.end;
     }
 
-    // Fill any remaining gap at the end of the line
     if (pos < line.length) {
       filledSpans.push({ start: pos, end: line.length });
     }
 
-    // Handle empty lines - create a single span covering the entire (empty) line
     if (filledSpans.length === 0 && line.length > 0) {
       filledSpans.push({ start: 0, end: line.length });
     }
 
     // Trim leading/trailing whitespace from non-whitespace-only spans
-    // NOISE spans (100% whitespace) are allowed to keep their whitespace
     const trimmedSpans: Array<{ start: number; end: number }> = [];
     for (const span of filledSpans) {
       const text = line.slice(span.start, span.end);
       const isAllWhitespace = /^\s*$/.test(text);
-      
+
       if (isAllWhitespace) {
-        // Keep whitespace-only spans as-is
         trimmedSpans.push(span);
       } else {
-        // Trim leading/trailing whitespace from content spans
         const leadingMatch = text.match(/^\s*/);
         const trailingMatch = text.match(/\s*$/);
         const leadingLen = leadingMatch ? leadingMatch[0].length : 0;
         const trailingLen = trailingMatch ? trailingMatch[0].length : 0;
-        
+
         const trimmedStart = span.start + leadingLen;
         const trimmedEnd = span.end - trailingLen;
-        
-        // Only add if there's content left after trimming
+
         if (trimmedStart < trimmedEnd) {
           trimmedSpans.push({ start: trimmedStart, end: trimmedEnd });
-          
-          // Add back the trimmed whitespace as separate spans
+
           if (leadingLen > 0) {
             trimmedSpans.push({ start: span.start, end: trimmedStart });
           }
@@ -243,39 +277,33 @@ export function spanGenerator(
             trimmedSpans.push({ start: trimmedEnd, end: span.end });
           }
         } else {
-          // If trimming removes everything, treat as whitespace span
           trimmedSpans.push(span);
         }
       }
     }
 
-    // Sort again after trimming created new spans
     trimmedSpans.sort((a, b) => a.start - b.start);
 
-    // Merge adjacent whitespace-only spans greedily (prefer longer contiguous whitespace)
+    // Merge adjacent whitespace-only spans greedily
     const mergedSpans: Array<{ start: number; end: number }> = [];
     for (const span of trimmedSpans) {
       const text = line.slice(span.start, span.end);
       const isWhitespace = /^\s*$/.test(text);
-      
+
       if (isWhitespace && mergedSpans.length > 0) {
         const lastSpan = mergedSpans[mergedSpans.length - 1]!;
         const lastText = line.slice(lastSpan.start, lastSpan.end);
         const lastIsWhitespace = /^\s*$/.test(lastText);
-        
+
         if (lastIsWhitespace) {
-          // Merge with previous whitespace span
           lastSpan.end = span.end;
           continue;
         }
       }
-      
+
       mergedSpans.push(span);
     }
 
-    // Enforce maxSpansPerLine after all processing
-    const finalSpans = mergedSpans.slice(0, maxSpansPerLine);
-
-    return { lineIndex, spans: finalSpans };
+    return { lineIndex, spans: mergedSpans.slice(0, maxSpansPerLine) };
   });
 }

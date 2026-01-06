@@ -4,6 +4,8 @@
  * callers can define their own field schemas, features, and validators.
  */
 
+import type { LabelModel, SpanLabelFeatureContext, SpanLabelScoringContext } from './labelModel.js';
+
 export const defaultWeights: Record<string, number> = {
   'line.leading_extid': 1.0,
   'line.has_name': 0.8,
@@ -49,5 +51,45 @@ export const defaultWeights: Record<string, number> = {
   'transition.B_to_B': -0.5,
   'transition.C_to_C': 0.3,
   'transition.any_to_B': 0.4
+};
+
+export const defaultLabelModel: LabelModel = {
+  featureContribution({ label, spanText, featureId, featureValue }: SpanLabelFeatureContext): number {
+    if (featureId === 'segment.is_phone') {
+      return label === 'Phone' ? featureValue : -0.5 * featureValue;
+    }
+    if (featureId === 'segment.is_email') {
+      return label === 'Email' ? featureValue : -0.5 * featureValue;
+    }
+    if (featureId === 'segment.is_extid') {
+      const exact10or11Digits = /^\d{10,11}$/.test(spanText.replace(/\D/g, ''));
+      if (exact10or11Digits) {
+        return (label === 'ExtID') ? -0.8 * featureValue : (label === 'Phone') ? 0.7 * featureValue : -0.3 * featureValue;
+      }
+      return label === 'ExtID' ? featureValue : -0.5 * featureValue;
+    }
+    if (featureId === 'segment.is_name') {
+      return label === 'Name' ? featureValue : -0.5 * featureValue;
+    }
+    if (featureId === 'segment.is_preferred_name') {
+      return label === 'PreferredName' ? featureValue : -0.5 * featureValue;
+    }
+    if (featureId === 'segment.is_birthdate') {
+      return label === 'Birthdate' ? featureValue : -0.5 * featureValue;
+    }
+    return featureValue;
+  },
+
+  scoreSpanLabel({ label, spanText, spanFeatures, weights, schema }: SpanLabelScoringContext): number {
+    if (label === schema.noiseLabel) return 0;
+    let score = 0;
+    for (const [fid, v] of Object.entries(spanFeatures)) {
+      const transformed = this.featureContribution
+        ? this.featureContribution({ label, spanText, featureId: fid, featureValue: v ?? 0, schema })
+        : (v ?? 0);
+      score += (weights[fid] ?? 0) * transformed;
+    }
+    return score;
+  }
 };
 

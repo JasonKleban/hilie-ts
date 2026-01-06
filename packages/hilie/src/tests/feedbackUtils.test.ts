@@ -2,10 +2,17 @@ import { pushUniqueFields, buildFeedbackFromHistories, removeEntityConflicts, no
 import { spanGenerator } from '../lib/utils.js'
 import { decodeJointSequence, decodeJointSequenceWithFeedback, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
-import type { FieldAssertion, EntityAssertion, FeedbackEntry } from '../lib/types.js'
+import type { FieldAssertion, FeedbackEntry } from '../lib/types.js'
 import { householdInfoSchema } from './test-helpers.js'
 import path from 'path'
 import { existsSync, readFileSync } from 'fs'
+
+type EntityAssertion = {
+  startLine: number;
+  endLine: number;
+  entityType?: any;
+  fields?: FieldAssertion[];
+}
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg)
@@ -24,18 +31,20 @@ function testBuildFeedback() {
   const entityHist: EntityAssertion[] = [{ startLine: 0, endLine: 0, entityType: 'Primary', fields: [] }]
   const fieldHist: FieldAssertion[] = [{ lineIndex: 0, start: 0, end: 3, fieldType: 'Name', action: 'add' }, { lineIndex: 1, start: 0, end: 5, fieldType: 'Email', action: 'add' }]
   const fb = buildFeedbackFromHistories(entityHist, fieldHist, new Set([0]))
-  // Expect an entry seeded at the boundary (line 0) and an entry for the ungrouped field line (line 1)
-  assert((fb.records ?? []).length === 2, 'buildFeedback should include record entries for both lines with either record assertions or fields')
-  const ent0 = (fb.records ?? []).find(e => e.startLine === 0)
-  const ent1 = (fb.records ?? []).find(e => e.startLine === 1)
-  assert(Boolean(ent0 && ent0.fields && ent0.fields.length === 1), 'entity at line 0 should have attached field')
-  assert(Boolean(ent1 && ent1.fields && ent1.fields.length === 1), 'entity at line 1 should have attached field')
+  const entries = fb.entries
+  assert(entries.some(e => e.kind === 'record' && e.startLine === 0 && e.endLine === 0), 'buildFeedback should include a record entry for the boundary line')
+  assert(entries.some(e => e.kind === 'subEntity'), 'buildFeedback should include the subEntity entry')
+  assert(entries.filter(e => e.kind === 'field').length === 2, 'buildFeedback should include field entries')
 }
 
 // removeEntityConflicts removes overlapping items
 function testRemoveEntityConflicts() {
   const entityHist: EntityAssertion[] = [{ startLine: 0, endLine: 0, fields: [] }, { startLine: 3, endLine: 3, fields: [] }]
-  const fieldHist: FieldAssertion[] = [{ lineIndex: 0, start: 0, end: 3 }, { lineIndex: 3, start: 0, end: 2 }, { lineIndex: 4, start: 0, end: 2 }]
+  const fieldHist: FieldAssertion[] = [
+    { action: 'add', fieldType: 'Name', lineIndex: 0, start: 0, end: 3 },
+    { action: 'add', fieldType: 'Name', lineIndex: 3, start: 0, end: 2 },
+    { action: 'add', fieldType: 'Name', lineIndex: 4, start: 0, end: 2 }
+  ]
   const boundarySet = new Set([0,3,4])
   const { remainingEntities, newFieldHist, newBoundarySet } = removeEntityConflicts(entityHist, fieldHist, boundarySet, 3, 4)
   assert(remainingEntities.length === 1 && remainingEntities[0]!.startLine === 0, 'removeEntityConflicts removes overlapping entities')
@@ -72,8 +81,12 @@ function testFeedbackTwoEntities() {
   const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
 
   // Build entity-only feedback and submit via the helper and update routine
-  const entityHist: EntityAssertion[] = [{ startLine: 0, endLine: 0, entityType: 'Primary', fields: [] }, { startLine: 5, endLine: 5, entityType: 'Guardian', fields: [] }]
-  const fb = buildFeedbackFromHistories(entityHist, [], new Set())
+  // Create file-level sub-entity assertions to avoid relying on startLine/endLine
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
+  const fb: any = { entries: [
+    { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[0]! + lines[0]!.length, entityType: 'Primary' },
+    { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[5]! + lines[5]!.length, entityType: 'Guardian' }
+  ] }
 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, { ...weights }, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
 
@@ -120,7 +133,7 @@ function testFirstTwoCase1Records() {
   const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
   const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
 
-  // Assert the first two records by specifying start/end lines
+  // Assert the first two records by specifying start/end lines (records still use startLine/endLine)
   const fbEntities: EntityAssertion[] = [
     { startLine: 0, endLine: first.length - 1 },
     { startLine: first.length, endLine: first.length + second.length - 1 }
@@ -204,9 +217,10 @@ function testAssertedRangesNotSubdivided() {
   const spanIdx = spans[0]!.spans.findIndex(s => s.start === nameSpan.start && s.end === nameSpan.end)
   assert(spanIdx >= 0, 'expected to find the asserted span index on line 0')
 
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const entries: FeedbackEntry[] = [
     { kind: 'record', startLine: 0, endLine: 2 },
-    { kind: 'subEntity', startLine: 0, endLine: 2, entityType: 'Primary' as any },
+    { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Primary' as any },
     { kind: 'field', field: { action: 'add', lineIndex: 0, start: nameSpan.start, end: nameSpan.end, fieldType: 'Name', confidence: 1.0 } }
   ]
 
@@ -277,11 +291,12 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   const spans = spanGenerator(lines, {})
   const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
 
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const feedback = {
     entries: [
       { kind: 'record', startLine: 0, endLine: 8 },
       { kind: 'record', startLine: 20, endLine: 25 },
-      { kind: 'subEntity', startLine: 5, endLine: 8, entityType: 'Guardian' }
+      { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
     ]
   } as any
 
@@ -342,11 +357,12 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
   // - assert the Oliver Smith record (10-18)
   // - assert Guardian in that record (15-18)
   // - ALSO assert Guardian in the *previous* record (5-8) without explicitly asserting that record
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const feedback = {
     entries: [
       { kind: 'record', startLine: 10, endLine: 18 },
-      { kind: 'subEntity', startLine: 15, endLine: 18, entityType: 'Guardian' },
-      { kind: 'subEntity', startLine: 5, endLine: 8, entityType: 'Guardian' }
+      { kind: 'subEntity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' },
+      { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
     ]
   } as any
 
@@ -404,6 +420,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   const spans = spanGenerator(lines, {})
   const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
 
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const feedback = {
     entries: [
       {
@@ -417,7 +434,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
           confidence: 1
         }
       },
-      { kind: 'subEntity', startLine: 15, endLine: 18, entityType: 'Guardian' }
+      { kind: 'subEntity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' }
     ]
   } as any
 

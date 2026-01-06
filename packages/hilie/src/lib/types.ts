@@ -170,43 +170,18 @@ export interface RecordSpan {
   subEntities: SubEntitySpan[];
 }
 
-export interface FieldAssertion extends Partial<FieldSpan> {
-  // action: 'add' to assert new span; 'remove' to remove an existing span
-  action?: 'add' | 'remove';
-  // asserted confidence (0..1)
+export interface FieldAssertion {
+  action: 'add' | 'remove';
+  lineIndex: number;
+  start: number;
+  end: number;
+  fieldType: FieldLabel;
   confidence?: number;
 }
 
-// Record-level assertion (top-level container). startLine and endLine are required.
-export interface RecordAssertion {
-  startLine: number;
-  endLine: number;
-  fileStart?: number;
-  fileEnd?: number;
-  // attached field assertions for convenience
-  fields?: FieldAssertion[];
-}
-
-// Sub-entity assertion (Primary/Guardian) within a Record
-export interface SubEntityAssertion {
-  startLine: number;
-  endLine: number;
-  entityType?: EntityType;
-  fields?: FieldAssertion[];
-}
-
-// Backwards-compatibility alias: an EntityAssertion can be either a Record or a SubEntity
-export type EntityAssertion = RecordAssertion | SubEntityAssertion;
-
 export interface Feedback {
-  // Preferred shape: chronologically ordered feedback entries (newest last).
-  entries?: FeedbackEntry[];
-
-  // Prefer explicit properties: records (top-level) and subEntities (Primary/Guardian)
-  records?: RecordAssertion[];
-  subEntities?: SubEntityAssertion[];
-  // legacy property for backward-compatibility
-  entities?: RecordAssertion[];
+  // Chronologically ordered feedback entries (newest last).
+  entries: FeedbackEntry[];
 }
 
 export type FeedbackEntry =
@@ -217,8 +192,10 @@ export type FeedbackEntry =
     }
   | {
       kind: 'subEntity';
-      startLine: number;
-      endLine: number;
+      // Optional file-level offsets (character indices, end exclusive). If present,
+      // these specify the assertion precisely and are used to compute line spans.
+      fileStart?: number;
+      fileEnd?: number;
       entityType: EntityType;
     }
   | {

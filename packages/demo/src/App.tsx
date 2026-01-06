@@ -3,13 +3,16 @@ import {
   decodeJointSequence,
   decodeJointSequenceWithFeedback,
   entitiesFromJointSequence,
-  spanGenerator,
+  candidateSpanGenerator,
+  coverageSpanGeneratorFromCandidates,
   updateWeightsFromUserFeedback,
   type JointSequence,
+  type JointState,
   type RecordSpan,
   type SubEntitySpan,
   type FieldSpan,
   type FieldAssertion,
+  type FieldLabel,
   type LineSpans,
   type EntityType,
   type FeedbackEntry
@@ -73,7 +76,7 @@ function App() {
     setIsLoading(true)
     setTimeout(() => {
       try {
-        const spans = spanGenerator(lines)
+        const spans = candidateSpanGenerator(lines)
         setSpansPerLine(spans)
 
         const decodeOpts = { maxStates: 512, safePrefix: 6 }
@@ -200,7 +203,7 @@ function App() {
           
           const linesArray = normalized.split('\n')
           setLines(linesArray)
-          let spans = spanGenerator(linesArray)
+          let spans = candidateSpanGenerator(linesArray)
 
           // If there is feedback, re-decode while honoring it as hard constraints
           // so asserted spans/labels persist across subsequent re-decodes.
@@ -266,6 +269,59 @@ function App() {
 
       // Helper: compute file offset from a DOM point by finding nearest ancestor with data-file-start
       const getFileOffsetFromPoint = (node: Node, nodeOffset: number): number | null => {
+        const findFirstAnchoredElement = (root: Node): Element | null => {
+          const stack: Node[] = [root]
+          while (stack.length) {
+            const cur = stack.shift()!
+            if (cur.nodeType === Node.ELEMENT_NODE) {
+              const el = cur as Element
+              if (el.hasAttribute('data-file-start')) return el
+              for (const child of Array.from(el.childNodes)) stack.push(child)
+            }
+          }
+          return null
+        }
+
+        const findLastAnchoredElement = (root: Node): Element | null => {
+          const stack: Node[] = [root]
+          while (stack.length) {
+            const cur = stack.pop()!
+            if (cur.nodeType === Node.ELEMENT_NODE) {
+              const el = cur as Element
+              if (el.hasAttribute('data-file-end')) return el
+              const children = Array.from(el.childNodes)
+              // Push children so the last child is visited first.
+              for (let i = 0; i < children.length; i++) stack.push(children[i]!)
+            }
+          }
+          return null
+        }
+
+        // If the range endpoint lands on an element boundary (common between block elements),
+        // resolve it by snapping to the adjacent anchored node.
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const elNode = node as Element
+          const children = Array.from(elNode.childNodes)
+
+          if (nodeOffset > 0) {
+            const prev = children[nodeOffset - 1]
+            if (prev) {
+              const prevEl = findLastAnchoredElement(prev)
+              const endAttr = prevEl?.getAttribute('data-file-end')
+              if (endAttr != null) return Number(endAttr)
+            }
+          }
+
+          if (nodeOffset < children.length) {
+            const next = children[nodeOffset]
+            if (next) {
+              const nextEl = findFirstAnchoredElement(next)
+              const startAttr = nextEl?.getAttribute('data-file-start')
+              if (startAttr != null) return Number(startAttr)
+            }
+          }
+        }
+
         // Find ancestor element that maps to a file range
         let el: Element | null = node.nodeType === Node.TEXT_NODE ? (node as Text).parentElement : (node as Element)
         while (el && !el.hasAttribute('data-file-start')) el = el.parentElement
@@ -366,7 +422,7 @@ function App() {
       lineIndex: startLine,
       start: startOffset,
       end: actualEndOffset,
-      fieldType,
+      fieldType: fieldType as FieldAssertion['fieldType'],
       confidence: 1.0
     }
 
@@ -384,7 +440,7 @@ function App() {
                   lineIndex: startLine,
                   start: field.start,
                   end: field.end,
-                  fieldType: field.fieldType,
+                  fieldType: (field.fieldType ?? householdInfoSchema.noiseLabel) as FieldAssertion['fieldType'],
                   confidence: 1.0
                 })
               }
@@ -416,7 +472,7 @@ function App() {
 
     const newEntries: FeedbackEntry[] = (() => {
       if (entityType != null) {
-        return [...feedbackEntries, { kind: 'subEntity', startLine, endLine, entityType: entityType as EntityType }]
+        return [...feedbackEntries, { kind: 'subEntity', startLine, endLine, fileStart: start, fileEnd: end, entityType: entityType as EntityType }]
       }
       return [...feedbackEntries, { kind: 'record', startLine, endLine }]
     })()
@@ -436,11 +492,7 @@ function App() {
 
     const { start, end } = textSelection
 
-    // Map offsets -> lines using the precomputed lineStarts
-    const startLine = offsetToLine(start)
-    const endLine = offsetToLine(Math.max(start, end - 1))
-
-    const newEntries: FeedbackEntry[] = [...feedbackEntries, { kind: 'subEntity', startLine, endLine, entityType: type as EntityType }]
+    const newEntries: FeedbackEntry[] = [...feedbackEntries, { kind: 'subEntity', fileStart: start, fileEnd: end, entityType: type as EntityType }]
     setFeedbackEntries(newEntries)
     submitUnifiedFeedback(newEntries)
   }
@@ -453,12 +505,46 @@ function App() {
   }, [records, normalizedText])
 
   const renderedContent = useMemo(() => {
-    if (!normalizedText || !records) return null
+    if (!normalizedText || !jointSeq || spansPerLine.length === 0) return null
+
+    // UI rendering uses full-coverage spans derived from the *current* candidate spans.
+    // This keeps offsets stable even when candidate spans are sparse or feedback adds spans.
+    const coverageSpans = coverageSpanGeneratorFromCandidates(lines, spansPerLine)
+
+    // Inflate the decoded joint sequence onto the coverage spans by copying labels
+    // for exact-matching candidate spans and labeling all other spans as NOISE.
+    const inflatedJointSeq: JointSequence = jointSeq.map((state, lineIndex): JointState => {
+      const candidateLine = spansPerLine[lineIndex]
+      const coverageLine = coverageSpans[lineIndex]
+      const candidateFields = state?.fields ?? []
+
+      const labelBySpan = new Map<string, FieldLabel>()
+      for (let i = 0; i < (candidateLine?.spans?.length ?? 0); i++) {
+        const sp = candidateLine!.spans[i]!
+        const lab = candidateFields[i]
+        if (lab) labelBySpan.set(`${sp.start}-${sp.end}`, lab)
+      }
+
+      const fields: FieldLabel[] = (coverageLine?.spans ?? []).map(sp => {
+        return labelBySpan.get(`${sp.start}-${sp.end}`) ?? householdInfoSchema.noiseLabel
+      })
+
+      return { ...state, fields }
+    })
+
+    const recordsForRender = entitiesFromJointSequence(
+      lines,
+      coverageSpans,
+      inflatedJointSeq,
+      weights,
+      segmentFeatures,
+      householdInfoSchema
+    )
 
     // Defensive: clamp any out-of-bounds record offsets created by upstream code
     const textLen = normalizedText.length
     let adjusted = false
-    const sanitized: RecordSpan[] = records.map(r => {
+    const sanitized: RecordSpan[] = recordsForRender.map(r => {
       const fs = Math.max(0, Math.min(textLen, r.fileStart ?? 0))
       const fe = Math.max(0, Math.min(textLen, r.fileEnd ?? fs))
       if (fs !== (r.fileStart ?? 0) || fe !== (r.fileEnd ?? 0)) adjusted = true
@@ -486,7 +572,7 @@ function App() {
     if (adjusted) console.warn('Adjusted out-of-bounds record offsets for rendering')
 
     return renderWithSpans(normalizedText, sanitized, hoverState, setHoverState)
-  }, [normalizedText, records, hoverState])
+  }, [normalizedText, lines, spansPerLine, jointSeq, weights, hoverState])
 
   // Ensure the UI shows all known sub-entity types (even if none were decoded)
   const allKnownSubEntityTypes = ['Primary', 'Guardian'] as const
@@ -635,9 +721,11 @@ function App() {
                               )
                             }
                             if (entry.kind === 'subEntity') {
+                              const fileRange = (entry as any).fileStart !== undefined && (entry as any).fileEnd !== undefined
+                              const lineRange = (entry as any).startLine !== undefined && (entry as any).endLine !== undefined
                               return (
                                 <li key={`e-${idx}`}>
-                                  #{idx + 1} Sub-Entity: {entry.entityType} line {entry.startLine}{entry.endLine !== entry.startLine ? `–${entry.endLine}` : ''}
+                                  #{idx + 1} Sub-Entity: {entry.entityType} {lineRange ? `line ${(entry as any).startLine}${(entry as any).endLine !== (entry as any).startLine ? `–${(entry as any).endLine}` : ''}` : (fileRange ? `chars ${(entry as any).fileStart}–${(entry as any).fileEnd}` : '')}
                                 </li>
                               )
                             }
@@ -708,6 +796,16 @@ function renderWithSpans(
 
     // Set lastEnd to record.fileEnd (exclusive) so we can consistently compute gaps
     lastEnd = effectiveFileEnd
+
+    // If the next character(s) are newline separators (CRLF or LF), advance
+    // lastEnd to skip them so we don't render those separators as separate
+    // `raw-text` gaps between adjacent records. This preserves block layout
+    // but avoids producing isolated `raw-text` spans between records.
+    if (lastEnd < text.length) {
+      const twoNext = text.slice(lastEnd, lastEnd + 2)
+      if (twoNext === '\r\n') lastEnd += 2
+      else if (text[lastEnd] === '\n' || text[lastEnd] === '\r') lastEnd += 1
+    }
   }
 
   // Add remaining text
@@ -796,6 +894,15 @@ function renderFields(
       elements.push(
         renderRawText(text, lastEnd, field.fileStart, `text-${lastEnd}`)
       )
+    }
+
+    // Treat NOISE spans as raw text (used for UI coverage/anchoring).
+    if (!field.fieldType || field.fieldType === householdInfoSchema.noiseLabel) {
+      elements.push(
+        renderRawText(text, field.fileStart, field.fileEnd, `noise-${field.fileStart}-${field.fileEnd}`)
+      )
+      lastEnd = field.fileEnd
+      continue
     }
 
     const spanId = `field-${field.fileStart}-${field.fileEnd}`

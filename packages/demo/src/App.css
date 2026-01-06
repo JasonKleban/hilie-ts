@@ -141,7 +141,7 @@
   outline-offset: -1px;
   border-radius: 2px;
   padding: 3px 0;
-  display: inline-block;
+  display: inline;
   background-color: rgba(83, 191, 242, 0.02);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;

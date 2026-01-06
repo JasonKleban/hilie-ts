@@ -1,57 +1,63 @@
-# hilie-ts — Human-in-the-loop Information Extractor (TypeScript)
+# hilie — Human-in-the-loop Information Extractor (TypeScript)
 
-(This is almost entirely AI-generated and I don't know yet if it really works, but it seems to almost do something cool.)
+Experimental library for human-in-the-loop information extraction from messy, semi-structured text.
 
-A compact library demonstrating Viterbi-based boundary and joint decoding for simple information extraction workflows.
+At its core, it does a *joint* Viterbi decode over:
+
+- per-line **record boundaries** (`'B'` start vs `'C'` continue)
+- per-span **field labels** (e.g. `Name`, `Phone`, `Email`, `Birthdate`, `NOISE`)
 
 ## Concepts
 
-- **Lines & Spans**: Input text is processed line-by-line. For each line we may propose candidate spans (token/group positions) representing potential fields.
-  - Code: `LineSpans`, (`src/lib/utils.ts`)
+- **Lines & spans**: input text is processed line-by-line. For each line, we propose candidate spans (start/end character offsets) that may correspond to fields.
+  - Code: `LineSpans`, `spanGenerator` (`src/lib/utils.ts`)
 
-- **Features**: A set of small, interpretable feature functions that score properties of lines and spans. They are grouped as:
-  - *Boundary features* (e.g., indentation change, lexical similarity drop) used to detect record boundaries — `src/lib/features.ts` (`boundaryFeatures`).
-  - *Segment features* (e.g., token count bucket, numeric ratio) used to score candidate spans — `src/lib/features.ts` (`segmentFeatures`).
+- **Features**: small, interpretable scoring functions.
+  - *Boundary features* (line-level) used to detect record boundaries — `boundaryFeatures` (`src/lib/features.ts`).
+  - *Segment features* (span-level) used to score candidate spans — `segmentFeatures` (`src/lib/features.ts`).
 
-- **Viterbi Decoding**:
-  - `jointViterbiDecode` performs a joint decoding across boundaries and field label assignments per-line. For single-purpose boundary decoding, you can derive per-line boundary scores from the boundary features or run `jointViterbiDecode` with simplified state spaces.
+- **Viterbi decoding**:
+  - `decodeJointSequence` runs the joint DP decode.
+  - `decodeJointSequenceWithFeedback` runs the decode while honoring feedback as *hard constraints*.
   - Code: `src/lib/viterbi.ts`.
 
-- **Types**: Central types and small configuration objects live in `src/lib/types.ts` (e.g., `JointState`, `TransitionWeights`, `defaultTransitions`).
+- **Types**: central types live in `src/lib/types.ts` (`JointState`, `JointSequence`, `FieldSchema`, `RecordSpan`, etc.).
 
 ### Terminology & Glossary 🔎
 
 A short glossary for domain terms and named identifiers used across the codebase:
 
-- **Joint** — short for a joint decoding pass (see `jointViterbiDecode`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels. A per-line `JointState` typically contains a `boundary` code (`B` = boundary/start, `C` = continuation) and a `fields` array of label assignments; a `JointSequence` is the array of per-line `JointState` entries that represents the full document decode.
+- **Joint** — short for a joint decoding pass (see `decodeJointSequence`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels.
 
-- **Annotation / Feedback** — user-provided corrections (e.g., in a human-in-the-loop workflow). Feedback is represented as an `entities` array with one or more asserted fields; each field has `action` (`add` | `remove`), `fieldType` (e.g., `Phone`), `start`/`end` offsets, and a `confidence`. Use `updateWeightsFromFeedback` to apply these annotations to model weights.
+- **Annotation / feedback** — user-provided corrections. The preferred input shape is `FeedbackEntry[]` on `feedback.entries` (newest last). Use:
+  - `decodeJointSequenceWithFeedback` to re-decode while keeping assertions stable
+  - `updateWeightsFromUserFeedback` to update weights based on corrections
 
-- **RecordSpan / SubEntitySpan** — the library's current public entity model. A `RecordSpan` represents a top-level record and contains `subEntities` (array of `SubEntitySpan`); each `SubEntitySpan` has an `entityType` (e.g., `Primary`, `Guardian`) and `fields` (field spans with `start`, `end`, `fileStart`, `fileEnd`, `entityStart`, `entityEnd`, and numeric `confidence`).
+- **RecordSpan / SubEntitySpan** — structured output. A `RecordSpan` is a top-level record; inside it, `subEntities` represent roles (e.g. `Primary`, `Guardian`) and hold `FieldSpan[]` with file-relative offsets and confidences.
 
 - **Field labels** — canonical labels you will encounter: `ExtID`, `Name`, `PreferredName`, `Phone`, `Email`, `Birthdate`, and `NOISE` (for non-field tokens).
 
 - **Boundary** — lines are marked with `boundary` codes: `B` for record start and `C` for continuation; boundary features are computed in `boundaryFeatures`.
 
 - **Selected named identifiers** (quick reference):
-  - `jointViterbiDecode` — main joint DP decoder (`src/lib/viterbi.ts`).
-  - `entitiesFromJoint` — converts joint output into `RecordSpan[]`.
-  - `annotateEntityTypes` — fills missing `entityType` hints on joint output.
-  - `inferRelationships` — infers Primary/Guardian relationships inside a record.
-  - `updateWeightsFromExample` / `updateWeightsFromFeedback` — trainer update functions for example-based and feedback-driven weight adjustments.
-  - `spanGenerator`, `enumerateStates` — span proposal and candidate-state enumerator helpers.
+  - `decodeJointSequence` — joint DP decoder.
+  - `entitiesFromJointSequence` — converts `JointSequence` into `RecordSpan[]`.
+  - `decodeJointSequenceWithFeedback` — decoder + hard feedback constraints.
+  - `updateWeightsFromUserFeedback` — weight update using feedback.
+  - `spanGenerator`, `detectDelimiter`, `enumerateStates` — span proposal and state space helpers.
 
 - **Nudge** — a targeted, calibrated update applied when straightforward feedback updates do not flip a model's prediction. Implemented by `updateWeightsFromFeedback` (helper `tryNudge`), a nudge identifies one or more features (e.g., `segment.is_phone`, `segment.is_email`, `segment.is_extid`) whose weight changes would most increase the score gap in favor of the asserted label, and then applies a scaled adjustment (respecting the learning rate and feedback confidence) to push the model toward the requested behavior.
 
 - **Feature name examples** — feature keys you may see in diagnostics or weight dumps: `segment.is_phone`, `segment.is_email`, `segment.is_extid`, `line.leading_extid`, `line.has_birthdate`, `line.lexical_similarity_drop`.
 
-> Note: The public JS/TS API is exported from `src/index.ts`; prefer the canonical names above when integrating with downstream tooling.
+> Note: the public JS/TS API is exported from `src/index.ts`.
 
 ## How the code maps to the idea
 
 - `src/lib/features.ts` implements feature primitives and exposes `segmentFeatures` and `boundaryFeatures` arrays used by the decoders.
-- `src/lib/viterbi.ts` implements core DP routines and supporting helpers (emission, transition scoring, enumerate states).
-- `src/lib/utils.ts` contains small utility helpers `spanGenerator` used in tests and demos.
+- `src/lib/viterbi.ts` implements core DP routines and supporting helpers.
+- `src/lib/utils.ts` contains span proposal utilities (`spanGenerator`, `detectDelimiter`).
+- `src/lib/feedbackUtils.ts` contains feedback normalization + conflict removal.
 
 **`spanGenerator`**
 - A more robust span proposal function that:
@@ -65,15 +71,96 @@ A short glossary for domain terms and named identifiers used across the codebase
 
 1. Build:
 
-   npm run build
+   `npm run build`
 
 2. Run tests:
 
-   npm test
+   `npm test`
 
 3. Use in your code:
 
-   import { jointViterbiDecode } from 'hilie-ts';
+```ts
+import {
+  boundaryFeatures,
+  defaultWeights,
+  decodeJointSequence,
+  entitiesFromJointSequence,
+  segmentFeatures,
+  spanGenerator,
+  type FieldSchema,
+} from 'hilie'
+
+const schema: FieldSchema = {
+  fields: [
+    { name: 'ExtID', maxAllowed: 1 },
+    { name: 'Name', maxAllowed: 2 },
+    { name: 'PreferredName', maxAllowed: 1 },
+    { name: 'Phone', maxAllowed: 3 },
+    { name: 'Email', maxAllowed: 3 },
+    { name: 'Birthdate', maxAllowed: 1 },
+    { name: 'NOISE', maxAllowed: 999 },
+  ],
+  noiseLabel: 'NOISE',
+}
+
+const lines = inputText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+const spans = spanGenerator(lines)
+
+const joint = decodeJointSequence(
+  lines,
+  spans,
+  { ...defaultWeights },
+  schema,
+  boundaryFeatures,
+  segmentFeatures,
+  { maxStates: 512, safePrefix: 6 }
+)
+
+const records = entitiesFromJointSequence(lines, spans, joint, defaultWeights, segmentFeatures, schema)
+```
+
+4. Applying feedback (two modes):
+
+- Keep assertions stable (hard constraints, no learning):
+
+```ts
+import { decodeJointSequenceWithFeedback } from 'hilie'
+
+const feedback = {
+  entries: [
+    { kind: 'record', startLine: 0, endLine: 10 },
+    { kind: 'field', field: { action: 'add', lineIndex: 0, start: 0, end: 12, fieldType: 'Name', confidence: 1 } },
+  ],
+}
+
+const { pred: constrainedJoint, spansPerLine: constrainedSpans } = decodeJointSequenceWithFeedback(
+  lines,
+  spans,
+  defaultWeights,
+  schema,
+  boundaryFeatures,
+  segmentFeatures,
+  feedback,
+  { maxStates: 512, safePrefix: 6 }
+)
+```
+
+- Learn from corrections (updates weights):
+
+```ts
+import { updateWeightsFromUserFeedback } from 'hilie'
+
+const { updated: newWeights, pred: newJoint } = updateWeightsFromUserFeedback(
+  lines,
+  spans,
+  joint,
+  feedback,
+  { ...defaultWeights },
+  boundaryFeatures,
+  segmentFeatures,
+  schema
+)
+```
 
 ## Roadmap / TODOs
 
