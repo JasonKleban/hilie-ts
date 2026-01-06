@@ -708,9 +708,25 @@ export function entitiesFromJointSequence(
 
     for (let li = startLine; li <= endLine; li++) {
       const role = ((jointLocal[li] && jointLocal[li]!.entityType) ? (jointLocal[li]!.entityType as SubEntityType) : 'Unknown');
-      // Ignore Unknown roles when constructing sub-entities (noise lines should not create sub-entities)
-      if (role === 'Unknown') continue;
       const spans = spansPerLine[li]?.spans ?? [];
+
+      // Historically we skipped Unknown roles so noise lines would not create sub-entities.
+      // However, when feedback only asserts field labels (no sub-entity typing), those
+      // asserted labels can land on lines that remain 'Unknown' and would otherwise be
+      // dropped from structured output (and therefore never rendered).
+      //
+      // Keep Unknown lines only when they contain at least one non-noise field label.
+      if (role === 'Unknown') {
+        let hasNonNoise = false;
+        for (let si = 0; si < spans.length; si++) {
+          const assignedLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[si]) ? jointSeq[li]!.fields[si] : undefined;
+          if (assignedLabel !== undefined && assignedLabel !== schema.noiseLabel) {
+            hasNonNoise = true;
+            break;
+          }
+        }
+        if (!hasNonNoise) continue;
+      }
 
       // collect fields for this line
       const lineFields: FieldSpan[] = [];

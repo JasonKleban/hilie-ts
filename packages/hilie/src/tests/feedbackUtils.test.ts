@@ -1,6 +1,6 @@
 import { pushUniqueFields, buildFeedbackFromHistories, removeEntityConflicts, normalizeFeedbackEntries } from '../lib/feedbackUtils.js'
 import { spanGenerator } from '../lib/utils.js'
-import { decodeJointSequence, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
+import { decodeJointSequence, decodeJointSequenceWithFeedback, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
 import type { FieldAssertion, EntityAssertion, FeedbackEntry } from '../lib/types.js'
 import { householdInfoSchema } from './test-helpers.js'
@@ -457,6 +457,67 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   console.log('✓ case1 Email assertion does not create overlapping spans')
 }
 
+function testCase1FieldOnlyEmailAssertionIsRendered() {
+  let filePath = path.join(process.cwd(), 'src', 'tests', 'data', 'case1.txt')
+  if (!existsSync(filePath)) filePath = path.join(process.cwd(), 'packages', 'hilie', 'src', 'tests', 'data', 'case1.txt')
+  assert(Boolean(existsSync(filePath)), `case1.txt not found at ${filePath}`)
+
+  const txt = readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = txt.split('\n')
+
+  // Use the same style of weights as the demo so the decode path matches.
+  const weights: any = {
+    'line.indentation_delta': 0.5,
+    'line.lexical_similarity_drop': 1.0,
+    'line.blank_line': 1.0,
+    'segment.token_count_bucket': 0.8,
+    'segment.numeric_ratio': 1.2,
+    'segment.is_email': 2.0,
+    'segment.is_phone': 1.5,
+    'field.relative_position_consistency': 0.6,
+    'field.optional_penalty': -0.4
+  }
+
+  const spans = spanGenerator(lines, {})
+
+  const feedback = {
+    entries: [
+      {
+        kind: 'field',
+        field: {
+          action: 'add',
+          lineIndex: 17,
+          start: 4,
+          end: 27,
+          fieldType: 'Email',
+          confidence: 1
+        }
+      }
+    ]
+  } as any
+
+  const res = decodeJointSequenceWithFeedback(
+    lines,
+    spans,
+    weights,
+    householdInfoSchema,
+    boundaryFeatures,
+    segmentFeatures,
+    feedback,
+    { maxStates: 512, safePrefix: 6 }
+  )
+
+  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, res.pred, weights, segmentFeatures, householdInfoSchema)
+
+  // Field-only feedback should still result in a renderable field span in some sub-entity and record.
+  const matches = records.flatMap(r => r.subEntities.flatMap(se => se.fields))
+    .filter(f => f.lineIndex === 17 && f.start === 4 && f.end === 27 && f.fieldType === 'Email')
+
+  assert(matches.length === 1, `expected field-only asserted Email span to be rendered once; got ${matches.length}`)
+
+  console.log('✓ case1 field-only Email assertion is rendered')
+}
+
 // Additional robustness tests to prevent overfitting to case1
 function testFirstTwoCase3Records() {
   let filePath = path.join(process.cwd(), 'src', 'tests', 'data', 'case3.txt')
@@ -537,6 +598,7 @@ testAssertedRangesNotSubdivided()
 testCase1RecordWithGuardianSubEntityDoesNotSplit()
 testCase1SubEntityOutsideRecordAssertionIsApplied()
 testCase1EmailAssertionDoesNotCreateOverlappingSpans()
+testCase1FieldOnlyEmailAssertionIsRendered()
 testFirstTwoCase3Records()
 testFirstTwoCase4Records()
 
