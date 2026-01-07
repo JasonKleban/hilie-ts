@@ -33,6 +33,9 @@ export function updateWeightsFromUserFeedback(
   const recordAssertions = normalizedFeedback.records;
   const subEntityAssertions = normalizedFeedback.subEntities;
 
+
+
+
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({
     lineIndex: s.lineIndex,
     spans: s.spans.map(sp => ({ start: sp.start, end: sp.end }))
@@ -90,6 +93,8 @@ export function updateWeightsFromUserFeedback(
   }
 
   const meanConf = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : 1.0;
+
+
 
   let maxAssertedSpanIdx = -1;
   for (const ent of feedbackEntities ?? []) {
@@ -324,6 +329,14 @@ export function updateWeightsFromUserFeedback(
       for (const k of keys) {
         const delta = (vGoldSpan[k] ?? 0) - (vPredSpan[k] ?? 0);
         weights[k] = (weights[k] ?? 0) + learningRate * (f.confidence ?? 1.0) * delta;
+      }
+    } else {
+      // No matching original span found for this remove assertion; apply a deterministic negative nudge
+      const featId = labelFeatureMap[f.fieldType as string];
+      if (featId) {
+        const beforeVal = weights[featId] ?? 0;
+        const nud = -2.0 * learningRate * (f.confidence ?? 1.0);
+        weights[featId] = beforeVal + nud;
       }
     }
   }
@@ -609,6 +622,32 @@ export function updateWeightsFromUserFeedback(
     if (!state) return state;
     const spansForLine = spansCopy[li]?.spans ?? [];
     const fields = [...(state.fields ?? [])];
+
+    // Apply remove assertions by forcing those spans to be noiseLabel in the prediction
+    for (const f of assertedFields.filter((x: any) => x.action === 'remove')) {
+      const liF = f.lineIndex ?? f.startLine ?? 0;
+      if (liF !== li) continue;
+      // If an exact span match exists, force it to noise; otherwise, mark overlapping spans as noise
+      let matched = false;
+      for (let si = 0; si < spansForLine.length; si++) {
+        const s = spansForLine[si]!;
+        if (s.start === f.start && s.end === f.end) {
+          while (fields.length <= si) fields.push(schema.noiseLabel);
+          fields[si] = schema.noiseLabel;
+          matched = true;
+        }
+      }
+      if (!matched) {
+        for (let si = 0; si < spansForLine.length; si++) {
+          const s = spansForLine[si]!;
+          const overlap = !(s.end <= (f.start ?? 0) || s.start >= (f.end ?? 0));
+          if (overlap) {
+            while (fields.length <= si) fields.push(schema.noiseLabel);
+            fields[si] = schema.noiseLabel;
+          }
+        }
+      }
+    }
 
     for (const [key, lab] of labelMapEntries) {
       const [lineStr, range] = key.split(':');

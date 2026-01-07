@@ -14,5 +14,8 @@
   "devDependencies": {
     "@types/node": "^25.0.3",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "lightningcss-win32-x64-msvc": "^1.30.2"
   }
 }

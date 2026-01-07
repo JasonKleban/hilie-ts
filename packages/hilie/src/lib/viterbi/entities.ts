@@ -126,6 +126,8 @@ export function entitiesFromJointSequence(
   featureWeights: Record<string, number> | undefined,
   segmentFeaturesArg: Feature[],
   schema: FieldSchema,
+  // Optional normalized sub-entity assertions coming from feedback (file ranges + entityType).
+  feedbackSubEntities?: { fileStart?: number; fileEnd?: number; startLine?: number; endLine?: number; entityType?: SubEntityType }[],
   labelModel?: LabelModel
 ): RecordSpan[] {
   const lm: LabelModel = labelModel ?? defaultLabelModel;
@@ -236,22 +238,90 @@ export function entitiesFromJointSequence(
       }
 
       const last = subEntities[subEntities.length - 1];
+
+      // Compute tight line bounds from any *non-NOISE* fields on this line. We
+      // ignore NOISE-only spans for tight bounds so that user-selected mid-line
+      // offsets are respected even when a line contains only NOISE tokens.
+      const nonNoiseFields = lineFields.filter(f => f.fieldType !== schema.noiseLabel)
+      const lineHasFields = nonNoiseFields.length > 0
+      const lineMinStart = lineHasFields ? Math.min(...nonNoiseFields.map(f => f.fileStart)) : (offsets[li] ?? 0)
+      const lineMaxEnd = lineHasFields ? Math.max(...nonNoiseFields.map(f => f.fileEnd)) : ((offsets[li] ?? 0) + (lines[li]?.length ?? 0))
+
       if (last && last.entityType === role) {
         last.endLine = li;
-        last.fileEnd = (offsets[li] ?? 0) + (lines[li]?.length ?? 0);
+        // When extending an existing sub-entity, extend its fileEnd to include
+        // any fields on this line, otherwise extend to the full line end.
+        last.fileEnd = lineHasFields ? Math.max(last.fileEnd ?? 0, lineMaxEnd) : ((offsets[li] ?? 0) + (lines[li]?.length ?? 0));
+        // Also ensure fileStart remains the earliest seen field start when possible.
+        if (lineHasFields) last.fileStart = Math.min(last.fileStart ?? lineMinStart, lineMinStart);
+
         for (const f of lineFields) last.fields.push(f);
       } else {
-        const fileStart = offsets[li] ?? 0;
-        const fileEnd = (offsets[li] ?? 0) + (lines[li]?.length ?? 0);
+        const fileStart = lineHasFields ? lineMinStart : (offsets[li] ?? 0);
+        const fileEnd = lineHasFields ? lineMaxEnd : ((offsets[li] ?? 0) + (lines[li]?.length ?? 0));
         subEntities.push({ startLine: li, endLine: li, fileStart, fileEnd, entityType: role, fields: lineFields });
       }
     }
 
+    // Prefer precise feedback file offsets for aggregated sub-entities when available.
+    function spansOverlap(aStart?: number, aEnd?: number, bStart?: number, bEnd?: number) {
+      if (aStart === undefined || aEnd === undefined || bStart === undefined || bEnd === undefined) return false
+      return !(aEnd <= bStart || aStart >= bEnd)
+    }
+
+    // Compute record-level file bounds early so we can clamp sub-entities to them
+    const recFileStart = offsets[startLine] ?? 0;
+    const recFileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
+
+    if (feedbackSubEntities && feedbackSubEntities.length > 0) {
+      for (const fb of feedbackSubEntities) {
+        if (fb.fileStart === undefined || fb.fileEnd === undefined || fb.entityType === undefined) continue
+        for (const se of subEntities) {
+          if (!spansOverlap(se.fileStart, se.fileEnd, fb.fileStart, fb.fileEnd)) continue
+
+          // Preserve the asserted file offsets (end-exclusive) and honor the
+          // asserted entity type even when the decoder disagreed.
+          se.fileStart = fb.fileStart
+          se.fileEnd = fb.fileEnd
+          se.entityType = fb.entityType as SubEntityType
+
+          // Recompute line bounds to be consistent with the preserved offsets.
+          const offsetToLine = (off: number) => {
+            if (offsets.length === 0) return 0
+            if (off < offsets[0]!) return 0
+            const lastIdx = offsets.length - 1
+            if (off >= offsets[lastIdx]!) return lastIdx
+            let lo = 0, hi = lastIdx
+            while (lo < hi) {
+              const mid = Math.floor((lo + hi + 1) / 2)
+              if ((offsets[mid] ?? 0) <= off) lo = mid
+              else hi = mid - 1
+            }
+            return lo
+          }
+          se.startLine = offsetToLine(se.fileStart)
+          se.endLine = offsetToLine(Math.max(0, se.fileEnd - 1))
+
+          // Clamp preserved sub-entity ranges to the containing record range
+          if (se.fileStart < recFileStart) se.fileStart = recFileStart
+          if (se.fileEnd > recFileEnd) se.fileEnd = recFileEnd
+        }
+      }
+    }
+
+    // Ensure fields are strictly inside their parent sub-entity bounds, and compute
+    // entity-relative offsets based on the sub-entity's file start (not record).
     for (const se of subEntities) {
-      const recFileStart = offsets[startLine] ?? 0;
+      // Clamp sub-entities to record bounds as a safety measure
+      if (se.fileStart < recFileStart) se.fileStart = recFileStart
+      if (se.fileEnd > recFileEnd) se.fileEnd = recFileEnd
+
+      // Filter out fields that fall outside the precise bounds of the sub-entity
+      se.fields = (se.fields ?? []).filter(f => (f.fileStart ?? 0) >= (se.fileStart ?? 0) && (f.fileEnd ?? 0) <= (se.fileEnd ?? 0))
+
       for (const f of se.fields) {
-        f.entityStart = f.fileStart - recFileStart;
-        f.entityEnd = f.fileEnd - recFileStart;
+        f.entityStart = f.fileStart - (se.fileStart ?? 0);
+        f.entityEnd = f.fileEnd - (se.fileStart ?? 0);
       }
     }
 

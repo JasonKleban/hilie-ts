@@ -1,4 +1,4 @@
-import { pushUniqueFields, buildFeedbackFromHistories, removeEntityConflicts, normalizeFeedbackEntries } from '../lib/feedbackUtils.js'
+import { pushUniqueFields, buildFeedbackFromHistories, removeEntityConflicts, normalizeFeedbackEntries, normalizeFeedback } from '../lib/feedbackUtils.js'
 import { spanGenerator } from '../lib/utils.js'
 import { decodeJointSequence, decodeJointSequenceWithFeedback, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
@@ -6,6 +6,8 @@ import type { FieldAssertion, FeedbackEntry } from '../lib/types.js'
 import { householdInfoSchema } from './test-helpers.js'
 import path from 'path'
 import { existsSync, readFileSync } from 'fs'
+
+declare const test: any;
 
 type EntityAssertion = {
   startLine: number;
@@ -107,13 +109,97 @@ function testFeedbackTwoEntities() {
     throw err
   }
 
-  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, res.pred, res.updated, segmentFeatures, householdInfoSchema)
+  const normalizedFb = normalizeFeedback(fb, lines)
+  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, res.pred, res.updated, segmentFeatures, householdInfoSchema, normalizedFb.subEntities)
   assert(records.length >= 2, 'there should be at least two top-level records')
   assert(records[0]!.subEntities[0]!.entityType === 'Primary', 'first sub-entity should be Primary')
   assert(records[1]!.subEntities[0]!.entityType === 'Guardian', 'second sub-entity should be Guardian')
+  // New assertion: when file-offset sub-entity feedback is provided, the rendered sub-entity should preserve asserted file offsets (no whole-line snap)
+  const fbPrimary = normalizedFb.subEntities.find(s => s.entityType === 'Primary')!
+  const fbGuardian = normalizedFb.subEntities.find(s => s.entityType === 'Guardian')!
+  assert(Boolean(fbPrimary && records[0]!.subEntities[0]!.fileStart === fbPrimary.fileStart && records[0]!.subEntities[0]!.fileEnd === fbPrimary.fileEnd), 'primary sub-entity should preserve fileStart/fileEnd')
+  assert(Boolean(fbGuardian && records[1]!.subEntities[0]!.fileStart === fbGuardian.fileStart && records[1]!.subEntities[0]!.fileEnd === fbGuardian.fileEnd), 'guardian sub-entity should preserve fileStart/fileEnd')
 
-  console.log('✓ feedback two-entity assertions respected')
+
 }
+
+// New test: decodeJointSequenceWithFeedback should normalize candidate spans
+// to lie within asserted sub-entity file ranges (so fields outside those
+// ranges are not considered as candidates for labeling inside the sub-entity).
+function testDecodeWithFeedbackSanitizesCandidates() {
+  const text = '  * Joshua Anderson (Grandparent)'
+  const lines = [text]
+  // Create explicit candidate spans that include an ExtID at 3..9 (outside
+  // the asserted sub-entity range at 10..32) and proper name spans afterwards.
+  const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 3 }, { start: 3, end: 9 }, { start: 10, end: 18 }, { start: 19, end: 32 } ] }] as any
+
+  const weights: any = {}
+  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+
+  // Assert a sub-entity by file offsets that starts at 10 and ends at 32.
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
+  const fb = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 32, entityType: 'Guardian' } ] }
+
+  const res = decodeJointSequenceWithFeedback(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
+  const sanitizedSpans = res.spansPerLine[0]!.spans
+
+  // The ExtID span (3..9) is outside the asserted range and does not
+  // overlap it, so it should be kept as a non-conflicting candidate
+  const hasExt = sanitizedSpans.some(s => s.start === 3 && s.end === 9)
+  assert(hasExt, 'Non-overlapping candidate span outside asserted sub-entity should be kept')
+
+  // At least one span inside 10..32 should remain (the sub-entity area)
+  const hasInside = sanitizedSpans.some(s => s.start >= 10 && s.end <= 32)
+  assert(hasInside, 'There should be candidate spans inside the asserted sub-entity')
+
+  // Additional test: partial-overlap spans should be removed, while
+  // non-overlapping spans outside the assertion are kept.
+  const spans2 = [{ lineIndex: 0, spans: [ { start: 0, end: 5 }, { start: 8, end: 12 }, { start: 12, end: 22 }, { start: 21, end: 25 } ] }] as any
+  // Assert sub-entity 10..20 on the line
+  const fb2 = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 20, entityType: 'Guardian' } ] }
+  const res2 = decodeJointSequenceWithFeedback(lines, spans2, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb2 as any)
+  const s2 = res2.spansPerLine[0]!.spans
+  // span 0..5 does not intersect 10..20 -> should be kept
+  assert(s2.some(x => x.start === 0 && x.end === 5), 'Non-overlapping span outside assertion should be kept')
+  // span 8..12 partially overlaps 10..20 -> remove
+  assert(!s2.some(x => x.start === 8 && x.end === 12), 'Partially overlapping span should be removed')
+  // span 12..22 partially overlaps 10..20 (extends beyond) -> remove
+  assert(!s2.some(x => x.start === 12 && x.end === 22), 'Span overlapping assertion end should be removed')
+  // span 21..25 is outside and non-overlapping -> should be kept
+  assert(s2.some(x => x.start === 21 && x.end === 25), 'Non-overlapping tail span should be kept')
+
+  // Pred should honor the asserted sub-entity entity type on the corresponding line
+  assert(Boolean(res.pred[0] && res.pred[0]!.entityType === 'Guardian'), 'Decoder pred should include forced entityType for line 0')
+
+
+
+// New test: forced field label assertions should be honored during decoding
+function testDecodeWithForcedFieldLabel() {
+  const lines = ['Foo Bar']
+  const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 3 }, { start: 4, end: 7 } ] }] as any
+  const weights: any = {}
+  const fb = { entries: [ { kind: 'field', field: { action: 'add', lineIndex: 0, start: 0, end: 3, fieldType: 'Name', confidence: 1.0 } } ] }
+
+  const res = decodeJointSequenceWithFeedback(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
+  // Ensure forced label is present in pred for that span index
+  const predFields = res.pred[0]!.fields
+  // find index for span 0-3
+  const idx = res.spansPerLine[0]!.spans.findIndex(s => s.start === 0 && s.end === 3)
+  if (idx < 0) throw new Error('expected forced span to be present in spans')
+  if (predFields[idx] !== 'Name') throw new Error(`expected forced label 'Name' at span idx ${idx}, got ${predFields[idx]}`)
+
+
+}
+
+testDecodeWithForcedFieldLabel()
+}
+
+// Register feedbackUtils test functions with Vitest
+// Each helper function is invoked inside a `test(...)` call to register it
+// as an explicit test case that Vitest will discover and report.
+
+
+
 
 // New test: mark the first two records in case1.txt and ensure decoder produces two record spans
 function testFirstTwoCase1Records() {
@@ -162,7 +248,9 @@ function testFirstTwoCase1Records() {
 
   assert(finalRecs.length === 2, `expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
 
-  console.log('✓ first-two case1 records feedback respected')
+
+
+
 }
 
 function testSingleCase1RecordRangeTerminates() {
@@ -196,7 +284,7 @@ function testSingleCase1RecordRangeTerminates() {
   const finalRecs = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, res.pred, res.updated, segmentFeatures, householdInfoSchema)
   assert(finalRecs.length >= 2, `expected at least two records after asserting the first record range, got ${finalRecs.length}`)
 
-  console.log('✓ single case1 record range terminates')
+
 }
 
 // New test: asserted record/sub-entity/field ranges must not be subdivided
@@ -262,7 +350,7 @@ function testAssertedRangesNotSubdivided() {
   const matched = se.fields.filter(f => f.lineIndex === 0 && f.start === nameSpan.start && f.end === nameSpan.end && f.fieldType === 'Name')
   assert(matched.length === 1, `expected exactly one Name field matching the asserted span; got ${matched.length}`)
 
-  console.log('✓ asserted record/sub-entity/field ranges are not subdivided')
+
 }
 
 function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
@@ -325,7 +413,7 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   assert(Boolean(guardian), 'expected a Guardian sub-entity span inside the first record')
   assert(guardian!.startLine === 5 && guardian!.endLine === 8, `expected Guardian sub-entity to be lines 5-8, got ${guardian!.startLine}-${guardian!.endLine}`)
 
-  console.log('✓ case1 asserted record with Guardian sub-entity does not split')
+
 }
 
 function testCase1SubEntityOutsideRecordAssertionIsApplied() {
@@ -394,7 +482,7 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
     assert(Boolean(res.pred[li] && res.pred[li]!.entityType === 'Guardian'), `line ${li} should be Guardian due to sub-entity assertion inside asserted record`) 
   }
 
-  console.log('✓ case1 sub-entity assertions apply outside record assertions')
+
 }
 
 function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
@@ -471,7 +559,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   const emailFields = guardian.fields.filter(f => f.lineIndex === 17 && f.start === 4 && f.end === 27 && f.fieldType === 'Email')
   assert(emailFields.length === 1, `expected exactly one Email field span on line 17 (4-27); got ${emailFields.length}`)
 
-  console.log('✓ case1 Email assertion does not create overlapping spans')
+
 }
 
 function testCase1FieldOnlyEmailAssertionIsRendered() {
@@ -532,7 +620,7 @@ function testCase1FieldOnlyEmailAssertionIsRendered() {
 
   assert(matches.length === 1, `expected field-only asserted Email span to be rendered once; got ${matches.length}`)
 
-  console.log('✓ case1 field-only Email assertion is rendered')
+
 }
 
 // Additional robustness tests to prevent overfitting to case1
@@ -563,7 +651,7 @@ function testFirstTwoCase3Records() {
   const finalRecs = entitiesFromJointSequence(lines, spans, fresh, weights, segmentFeatures, householdInfoSchema)
 
   assert(finalRecs.length === 2, `case3: expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
-  console.log('✓ first-two case3 records feedback respected')
+
 }
 
 function testFirstTwoCase4Records() {
@@ -600,23 +688,22 @@ function testFirstTwoCase4Records() {
   const finalRecs = entitiesFromJointSequence(lines, spans, fresh, weights, segmentFeatures, householdInfoSchema)
 
   assert(finalRecs.length === 2, `case4: expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
-  console.log('✓ first-two case4 records feedback respected')
+
 }
 
-// Run tests
-testPushUniqueFields()
-testBuildFeedback()
-testRemoveEntityConflicts()
-testNormalizeFeedbackEntriesKeepsRemoveFields()
-testFeedbackTwoEntities()
-testFirstTwoCase1Records()
-testSingleCase1RecordRangeTerminates()
-testAssertedRangesNotSubdivided()
-testCase1RecordWithGuardianSubEntityDoesNotSplit()
-testCase1SubEntityOutsideRecordAssertionIsApplied()
-testCase1EmailAssertionDoesNotCreateOverlappingSpans()
-testCase1FieldOnlyEmailAssertionIsRendered()
-testFirstTwoCase3Records()
-testFirstTwoCase4Records()
-
-console.log('✓ feedbackUtils tests passed')
+// Register tests with Vitest unconditionally — we no longer need the node fallback
+test('pushUniqueFields dedupes', () => testPushUniqueFields());
+test('buildFeedback merges histories', () => testBuildFeedback());
+test('removeEntityConflicts removes overlaps', () => testRemoveEntityConflicts());
+test('normalizeFeedbackEntries preserves remove fields', () => testNormalizeFeedbackEntriesKeepsRemoveFields());
+test('feedback two entities respected', () => testFeedbackTwoEntities());
+test('first two case1 records', () => testFirstTwoCase1Records());
+test('single case1 record range terminates', () => testSingleCase1RecordRangeTerminates());
+test('asserted ranges not subdivided', () => testAssertedRangesNotSubdivided());
+test('case1 record guardian subentity does not split', () => testCase1RecordWithGuardianSubEntityDoesNotSplit());
+test('case1 sub-entity outside record assertion applied', () => testCase1SubEntityOutsideRecordAssertionIsApplied());
+test('case1 email assertion does not create overlapping spans', () => testCase1EmailAssertionDoesNotCreateOverlappingSpans());
+test('case1 field-only Email assertion is rendered', () => testCase1FieldOnlyEmailAssertionIsRendered());
+test('first two case3 records', () => testFirstTwoCase3Records());
+test('first two case4 records', () => testFirstTwoCase4Records());
+test('decode sanitization preserves non-overlapping candidates', () => testDecodeWithFeedbackSanitizesCandidates());

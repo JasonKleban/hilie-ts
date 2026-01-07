@@ -45,7 +45,8 @@ export function enumerateStates(spans: LineSpans, schema: FieldSchema, opts?: En
     maxStates: opts?.maxStates ?? 2048,
     whitespaceSpanIndices: opts?.whitespaceSpanIndices ?? new Set<number>(),
     forcedLabelsByLine: opts?.forcedLabelsByLine ?? {},
-    forcedBoundariesByLine: opts?.forcedBoundariesByLine ?? {}
+    forcedBoundariesByLine: opts?.forcedBoundariesByLine ?? {},
+    forcedEntityTypeByLine: opts?.forcedEntityTypeByLine ?? {}
   };
 
   const repeatable = new Set<FieldLabel>();
@@ -77,13 +78,14 @@ export function enumerateStates(spans: LineSpans, schema: FieldSchema, opts?: En
     if (i === prefixLen) {
       const tail = spans.spans.slice(prefixLen).map(() => noiseLabel);
       const forcedBoundary = enumerateOpts.forcedBoundariesByLine?.[spans.lineIndex ?? -1];
+      const forcedEntity = enumerateOpts.forcedEntityTypeByLine?.[spans.lineIndex ?? -1];
       if (forcedBoundary !== undefined) {
         if (states.length < enumerateOpts.maxStates) {
-          states.push({ boundary: forcedBoundary as BoundaryState, fields: [...(acc as any), ...tail] });
+          states.push({ boundary: forcedBoundary as BoundaryState, fields: [...(acc as any), ...tail], ...(forcedEntity ? { entityType: forcedEntity } : {}) });
         }
       } else {
-        if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail] });
-        if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail] });
+        if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'B', fields: [...(acc as any), ...tail], ...(forcedEntity ? { entityType: forcedEntity } : {}) });
+        if (states.length < enumerateOpts.maxStates) states.push({ boundary: 'C', fields: [...(acc as any), ...tail], ...(forcedEntity ? { entityType: forcedEntity } : {}) });
       }
       return;
     }
@@ -141,6 +143,8 @@ export function enumerateStates(spans: LineSpans, schema: FieldSchema, opts?: En
       acc.pop();
       return;
     }
+
+    // no forced label; continue enumerating options
 
     for (const f of fieldLabels) {
       if (states.length >= enumerateOpts.maxStates) return;

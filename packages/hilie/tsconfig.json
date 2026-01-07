@@ -11,7 +11,7 @@
     "target": "esnext",
     // For nodejs:
     // "lib": ["esnext"],
-    "types": ["node"],
+    "types": ["node", "vitest/globals"],
     // and npm install -D @types/node
 
     // Other Outputs
@@ -39,5 +39,7 @@
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-  }
+  },
+  "exclude": ["vitest.config.ts", "dist"],
+  "include": ["src/**/*", "synthesized-data.d.ts"]
 }

@@ -8,12 +8,13 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node dist/tests/test.js",
-    "unit-test": "npm run build && node dist/tests/unit.test.js",
+    "test": "npm run build && vitest run",
+    "unit-test": "vitest run",
     "generate": "npm run build && node dist/scripts/convert.js"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^1.0.0"
   }
 }

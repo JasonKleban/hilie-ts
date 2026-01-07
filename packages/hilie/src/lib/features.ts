@@ -56,6 +56,29 @@ export const blankLine: Feature = {
   }
 };
 
+export const hangingContinuation: Feature = {
+  id: 'line.hanging_continuation',
+  apply(ctx) {
+    // Is the *next* line a hanging-indented continuation (starts with indentation
+    // and lacks a list marker or numbered bullet)?
+    const next = ctx.lines[ctx.lineIndex + 1] ?? '';
+    if (!next) return 0;
+
+    // Must start with some whitespace
+    if (!/^\s+/.test(next)) return 0;
+    const trimmed = next.trimStart();
+    if (!trimmed) return 0;
+    const ch = trimmed[0];
+
+    // Exclude bullets and common list markers
+    if (ch === '-' || ch === '*' || ch === '•' || ch === '+') return 0;
+    // Exclude numbered bullets like "1." or "2)"
+    if (/^\d+[\.)]/.test(trimmed)) return 0;
+
+    return 1;
+  }
+};
+
 export const tokenCountBucket: Feature = {
   id: 'segment.token_count_bucket',
   apply(ctx) {
@@ -569,6 +592,9 @@ export const boundaryFeatures: Feature[] = [
   indentationDelta,
   lexicalSimilarityDrop,
   blankLine,
+  // Hanging continuation is a useful boundary hint: treat next indented non-list
+  // line as a continuation which favors a boundary on the preceding line.
+  hangingContinuation,
   primaryLikely,
   guardianLikely
 ];

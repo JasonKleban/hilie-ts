@@ -145,6 +145,24 @@ const { pred: constrainedJoint, spansPerLine: constrainedSpans } = decodeJointSe
 )
 ```
 
+- Sub-entity assertions (file offsets):
+
+Sub-entity assertions should be provided using file-relative character offsets (end-exclusive) in `fileStart` / `fileEnd` rather than `startLine` / `endLine`. The library internally maps file offsets to line ranges when needed.
+
+```ts
+// Compute lineStarts to convert line indices to file offsets (example):
+const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
+
+// Assert that the first line is a Primary sub-entity via file offsets:
+const feedback = {
+  entries: [
+    { kind: 'subEntity', fileStart: lineStarts[0], fileEnd: lineStarts[0] + lines[0].length, entityType: 'Primary' },
+  ]
+}
+
+// Then use the same helpers as above to decode with feedback or update weights.
+```
+
 - Learn from corrections (updates weights):
 
 ```ts

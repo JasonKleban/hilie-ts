@@ -87,6 +87,8 @@ export interface EnumerateOptions {
   forcedLabelsByLine?: Record<number, Record<string, FieldLabel>>;
   // Optional per-line forced boundary map. Keyed by lineIndex -> 'B'|'C'
   forcedBoundariesByLine?: Record<number, BoundaryState>;
+  // Optional per-line forced entity type (e.g., Primary/Guardian/Unknown)
+  forcedEntityTypeByLine?: Record<number, SubEntityType>;
 }
 
 export type EntityType = 'Primary' | 'Guardian' | 'Unknown';

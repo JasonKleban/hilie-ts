@@ -152,6 +152,41 @@ export function decodeJointSequenceWithFeedback(
       const startLine = offsetToLine(fs)
       const endLine = offsetToLine(Math.max(0, fe - 1))
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
+      
+      // Calculate line-relative positions for the boundaries
+      const startLineOffset = lineStarts[startLine] ?? 0
+      const startInLine = fs - startLineOffset
+      const endLineOffset = lineStarts[endLine] ?? 0
+      const endInLine = (fe - 1) - endLineOffset
+      
+      // Ensure the exact boundary positions exist as spans
+      if (ensureLine(startLine)) {
+        const line = spansCopy[startLine]!
+        // Check if a span exists at this exact start position
+        let hasStartSpan = false
+        for (const sp of line.spans) {
+          if (sp.start === startInLine) {
+            hasStartSpan = true
+            break
+          }
+        }
+        // If not, create a minimal span at this position
+        if (!hasStartSpan && startInLine >= 0) {
+          const lineText = lines[startLine] ?? ''
+          // Find a reasonable end for this span (next delimiter or end of line)
+          let spanEnd = Math.min(startInLine + 1, lineText.length)
+          for (let i = startInLine + 1; i < lineText.length; i++) {
+            const ch = lineText[i]
+            if (ch === ' ' || ch === '\t' || ch === ',' || ch === '\n') {
+              spanEnd = i
+              break
+            }
+          }
+          line.spans.push({ start: startInLine, end: spanEnd })
+          line.spans.sort((a, b) => a.start - b.start)
+        }
+      }
+      
       for (let li = startLine; li <= boundedEnd; li++) {
         entityTypeMap[li] = ent.entityType as SubEntityType
       }
@@ -162,6 +197,81 @@ export function decodeJointSequenceWithFeedback(
       for (let li = startLine; li <= boundedEnd; li++) {
         entityTypeMap[li] = ent.entityType as SubEntityType;
       }
+    }
+  }
+
+  // Build allowed intervals per-line from file-anchored assertions (sub-entities,
+  // records, and explicit field assertions). These intervals are used to
+  // filter candidate spans so that decoding won't consider spans that
+  // partially overlap asserted intervals (partial overlaps are conflicts).
+  const allowedIntervals: Record<number, Array<{ start: number; end: number }>> = {};
+
+  // Sub-entity assertions first
+  for (const fb of feedbackSubEntities ?? []) {
+    if (fb.fileStart === undefined || fb.fileEnd === undefined) continue;
+    const fs = fb.fileStart;
+    const fe = fb.fileEnd;
+    const startLine = offsetToLine(fs);
+    const endLine = offsetToLine(Math.max(0, fe - 1));
+
+    for (let li = startLine; li <= Math.min(endLine, spansCopy.length - 1); li++) {
+      const lineStartOffset = lineStarts[li] ?? 0;
+      const lineText = lines[li] ?? '';
+      const liStart = li === startLine ? Math.max(0, fs - lineStartOffset) : 0;
+      const liEnd = li === endLine ? Math.min(lineText.length, fe - lineStartOffset) : lineText.length;
+      if (liStart >= liEnd) continue;
+      const arr = allowedIntervals[li] ?? (allowedIntervals[li] = []);
+      arr.push({ start: liStart, end: liEnd });
+    }
+  }
+
+  // Record assertions: treat the full lines in the record as allowed intervals
+  for (const r of recordAssertions ?? []) {
+    if (r.startLine === undefined || r.endLine === undefined) continue;
+    const startLine = Math.max(0, Math.min(r.startLine, spansCopy.length - 1));
+    const endLine = Math.max(startLine, Math.min(r.endLine, spansCopy.length - 1));
+    for (let li = startLine; li <= endLine; li++) {
+      const lineText = lines[li] ?? '';
+      const lineStartOffset = lineStarts[li] ?? 0;
+      const liStart = 0;
+      const liEnd = lineText.length;
+      const arr = allowedIntervals[li] ?? (allowedIntervals[li] = []);
+      arr.push({ start: liStart, end: liEnd });
+    }
+  }
+
+  // Field assertions: ensure exact field intervals are added so the exact
+  // asserted spans are considered allowed and protect them from being
+  // removed by partial-overlap filtering.
+  for (const ent of feedbackEntities ?? []) {
+    for (const f of ent.fields ?? []) {
+      if (f.start === undefined || f.end === undefined || f.lineIndex === undefined) continue;
+      const li = f.lineIndex;
+      if (li < 0 || li >= spansCopy.length) continue;
+      const arr = allowedIntervals[li] ?? (allowedIntervals[li] = []);
+      arr.push({ start: f.start, end: f.end });
+    }
+  }
+
+  // If any allowed intervals were defined, filter spans on those lines to
+  // remove spans that *partially* overlap an asserted sub-entity interval.
+  // Spans that are fully contained in an asserted interval are kept; spans
+  // that do not intersect any asserted interval are also kept (they don't
+  // conflict). Only spans with a partial overlap are removed.
+  if (Object.keys(allowedIntervals).length > 0) {
+    for (const [liStr, intervals] of Object.entries(allowedIntervals)) {
+      const li = Number(liStr);
+      const line = spansCopy[li];
+      if (!line) continue;
+      // Normalize intervals by sorting
+      intervals.sort((a, b) => a.start - b.start);
+      line.spans = line.spans.filter(sp => {
+        // If the span doesn't intersect any asserted interval, it's safe
+        const intersectsAny = intervals.some(iv => !(sp.end <= iv.start || sp.start >= iv.end));
+        if (!intersectsAny) return true;
+        // If it intersects, require it to be *fully contained* within one of them
+        return intervals.some(iv => sp.start >= iv.start && sp.end <= iv.end);
+      });
     }
   }
 
@@ -185,7 +295,8 @@ export function decodeJointSequenceWithFeedback(
       ...base,
       ...(safePrefix !== undefined ? { safePrefix } : {}),
       forcedLabelsByLine,
-      forcedBoundariesByLine
+      forcedBoundariesByLine,
+      forcedEntityTypeByLine: entityTypeMap
     } as EnumerateOptions;
   })();
 
