@@ -401,6 +401,223 @@ export const segmentSuffix2: Feature = {
   }
 };
 
+// =======================
+// Dynamic file-level feature discovery
+// =======================
+
+export type Role = 'preceding' | 'leading' | 'trailing' | 'succeeding' | 'delimiter'
+
+export type FeatureCandidate = {
+  id: string
+  kind: 'indent' | 'delimiter' | 'motif'
+  pattern?: RegExp
+  indentLevel?: number
+  roles: Role[]
+  examples: string[]
+  count: number
+  coverage: number
+  salience?: number
+}
+
+export type FeatureAnalysis = {
+  candidates: FeatureCandidate[]
+  defaultWeights: Record<string, number>
+}
+
+import { analyzeSubstringRhythmicity } from './motif.js'
+import { patternKeyForRegex } from './motif.js'
+
+function addExample(array: string[], s: string, max = 3) {
+  if (array.length >= max) return
+  array.push(s)
+}
+
+export function analyzeFileLevelFeatures(input: string, opts?: { minSimpleLength?: number }) : FeatureAnalysis {
+  const minSimpleLength = opts?.minSimpleLength ?? 5
+  const lines = input.split(/\n/)
+
+  // Indentation histogram
+  const indents = new Map<number, number>()
+  for (const l of lines) {
+    const m = l.match(/^\s*/)
+    const n = m ? m[0].length : 0
+    indents.set(n, (indents.get(n) ?? 0) + 1)
+  }
+
+  // pick top indent levels (descending frequency) but skip zero indent
+  const topIndents = [...indents.entries()].filter(([k]) => k > 0).sort((a,b) => b[1] - a[1]).slice(0,3).map(x => x[0])
+
+  const candidates: FeatureCandidate[] = []
+
+  for (const lvl of topIndents) {
+    const examples: string[] = []
+    let count = 0
+    for (const l of lines) {
+      if ((l.match(/^\s*/) ?? [''])[0].length === lvl) {
+        count++
+        addExample(examples, l.trim())
+      }
+    }
+    candidates.push({ id: `indent:${lvl}`, kind: 'indent', indentLevel: lvl, roles: ['leading'], examples, count, coverage: count / Math.max(1, lines.length) })
+  }
+
+  // delimiter detection: empty lines, lines that are mostly repeated punctuation, and indent-resets
+  const delimiterSamples = new Map<string, number>()
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i] ?? ''
+    const trimmed = l.trim()
+    if (!trimmed) {
+      delimiterSamples.set('<blank>', (delimiterSamples.get('<blank>') ?? 0) + 1)
+      continue
+    }
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      delimiterSamples.set(trimmed, (delimiterSamples.get(trimmed) ?? 0) + 1)
+      continue
+    }
+    // indent reset: if previous indent > current and current is minimal indent
+    if (i > 0) {
+      const prev = ((lines[i-1] ?? '').match(/^\s*/) ?? [''])[0].length
+      const curr = (l.match(/^\s*/) ?? [''])[0].length
+      const minIndent = Math.min(...Array.from(indents.keys()))
+      if (prev > curr && curr === minIndent) {
+        delimiterSamples.set('<indent-reset>', (delimiterSamples.get('<indent-reset>') ?? 0) + 1)
+      }
+    }
+  }
+
+  for (const [k, v] of delimiterSamples.entries()) {
+    const examples: string[] = []
+    if (k === '<blank>') addExample(examples, '')
+    else if (k === '<indent-reset>') addExample(examples, 'indent-reset')
+    else addExample(examples, k)
+    candidates.push({ id: `delimiter:${k}`, kind: 'delimiter', roles: ['delimiter'], examples, count: v, coverage: v / Math.max(1, lines.length) })
+  }
+
+  // motif-based candidates using existing motif analysis
+  const analysis = analyzeSubstringRhythmicity(input, 1e-6, minSimpleLength)
+  for (const m of analysis.motifs) {
+    const key = patternKeyForRegex(m.pattern)
+    const occs = analysis.occurrences.get(key) ?? []
+    const examples: string[] = []
+    let leading = 0, trailing = 0, delim = 0
+    for (const o of occs.slice(0, 50)) {
+      const pos = o.pos
+      const len = o.len
+      // find line start and end
+      const lineStart = input.lastIndexOf('\n', pos) + 1
+      const nextNewline = input.indexOf('\n', pos)
+      const lineEnd = nextNewline === -1 ? input.length : nextNewline
+      const sample = input.slice(pos, pos + len)
+      addExample(examples, sample)
+      if (pos === lineStart) leading++
+      if (pos + len === lineEnd) trailing++
+      if (sample.trim().length === (lineEnd - lineStart) || /^[-*_]{3,}$/.test(sample.trim())) delim++
+    }
+    const roles: Role[] = []
+    if (leading / Math.max(1, occs.length) >= 0.6) roles.push('leading')
+    if (trailing / Math.max(1, occs.length) >= 0.6) roles.push('trailing')
+    if (delim / Math.max(1, occs.length) >= 0.6) roles.push('delimiter')
+    if (roles.length === 0) roles.push('preceding')
+
+    candidates.push({ id: `motif:${key}`, kind: 'motif', pattern: m.pattern, roles, examples, count: m.count, coverage: (m.count * m.minLength) / Math.max(1, input.length), salience: m.salience })
+  }
+
+  // compute default weights
+  const defaultWeights: Record<string, number> = {}
+  const roleMultiplier: Record<Role, number> = { delimiter: 1.2, leading: 1.0, preceding: 0.8, trailing: 0.8, succeeding: 0.8 }
+
+  for (const c of candidates) {
+    for (const r of c.roles) {
+      const key = `${c.id}|${r}`
+      const base = Math.log(1 + c.count)
+      const sal = c.salience ?? 1
+      const weight = Math.max(0.01, Math.min(5, base * sal * roleMultiplier[r]))
+      defaultWeights[key] = weight
+    }
+  }
+
+  return { candidates, defaultWeights }
+}
+
+// Convert FeatureCandidate to runtime Feature objects used by decoder/trainer
+export function dynamicCandidatesToFeatures(cands: FeatureCandidate[]) {
+  const boundaryFeatures: Feature[] = []
+  const segmentFeatures: Feature[] = []
+
+  for (const c of cands) {
+    for (const r of c.roles) {
+      const id = `dyn:${c.id}|${r}`
+
+      if (r === 'delimiter') {
+        // boundary-level feature: line matches delimiter
+        const f: Feature = { id, apply(ctx) {
+          const line = ctx.lines[ctx.lineIndex] ?? ''
+          if (c.kind === 'delimiter') {
+            if (c.examples.includes('') && line.trim() === '') return 1
+            const pat = c.pattern ?? undefined
+            if (pat) return pat.test(line) ? 1 : 0
+            if (c.id.startsWith('delimiter:')) {
+              const k = c.id.split(':')[1]
+              if (k === '<indent-reset>') {
+                // crude: check previous indent > current and current == min indent
+                const prev = ctx.lines[ctx.lineIndex - 1] ?? ''
+                const prevIndent = (prev.match(/^\s*/) ?? [''])[0].length
+                const currIndent = (line.match(/^\s*/) ?? [''])[0].length
+                const minIndent = 0
+                return prevIndent > currIndent && currIndent === minIndent ? 1 : 0
+              }
+            }
+          }
+          if (c.kind === 'motif' && c.pattern) return c.pattern.test(line) ? 1 : 0
+          return 0
+        }}
+        boundaryFeatures.push(f)
+      } else {
+        // segment-level features (preceding/leading/trailing)
+        const sf: Feature = { id, apply(ctx) {
+          if (!ctx.candidateSpan) return 0
+          const { lineIndex, start, end } = ctx.candidateSpan
+          const line = ctx.lines[lineIndex] ?? ''
+
+          if (c.kind === 'indent' && c.indentLevel !== undefined) {
+            const indent = (line.match(/^\s*/) ?? [''])[0].length
+            if (r === 'leading') return indent === c.indentLevel ? 1 : 0
+            return 0
+          }
+
+          if (c.kind === 'motif' && c.pattern) {
+            // leading: pattern immediately before span start
+            const beforeText = line.slice(0, start)
+            const afterText = line.slice(end)
+            if (r === 'leading') return c.pattern.test(line.slice(0, Math.min(line.length, start + 20))) ? 1 : 0
+            if (r === 'trailing') return c.pattern.test(line.slice(Math.max(0, end - 20))) ? 1 : 0
+            if (r === 'preceding') {
+              // check if last match before start ends near start
+              const g = new RegExp(c.pattern.source, c.pattern.flags.replace('g','') + 'g')
+              let m: RegExpExecArray | null
+              let lastEnd = -1
+              while ((m = g.exec(beforeText)) !== null) lastEnd = m.index + m[0].length
+              return (lastEnd >= 0 && start - lastEnd <= 2) ? 1 : 0
+            }
+            if (r === 'succeeding') {
+              const g = new RegExp(c.pattern.source, c.pattern.flags.replace('g','') + 'g')
+              let m: RegExpExecArray | null
+              let firstStart = -1
+              while ((m = g.exec(afterText)) !== null) { if (firstStart === -1) firstStart = m.index }
+              return (firstStart >= 0 && firstStart <= 2) ? 1 : 0
+            }
+          }
+
+          return 0
+        }}
+        segmentFeatures.push(sf)
+      }
+    }
+  }
+
+  return { boundaryFeatures, segmentFeatures }
+}
+
 export const segmentFeatures: Feature[] = [
   // put stronger signals up-front so they influence decoding earlier
   segmentIsExtID,

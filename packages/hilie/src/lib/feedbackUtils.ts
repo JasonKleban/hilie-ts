@@ -23,9 +23,6 @@ function rangesOverlap(aStart: number, aEnd: number, bStart: number, bEnd: numbe
   return !(aEnd < bStart || aStart > bEnd)
 }
 
-function isContained(innerStart: number, innerEnd: number, outerStart: number, outerEnd: number) {
-  return innerStart >= outerStart && innerEnd <= outerEnd
-}
 
 function spansOverlap(aStart?: number, aEnd?: number, bStart?: number, bEnd?: number) {
   if (aStart === undefined || aEnd === undefined || bStart === undefined || bEnd === undefined) return false

@@ -178,18 +178,15 @@ export function enumerateStates(spans: LineSpans, schema: FieldSchema, opts?: En
   return states;
 }
 
-export function decodeJointSequence(
+export function prepareDecodeCaches(
   lines: string[],
   spansPerLine: LineSpans[],
   featureWeights: Record<string, number>,
   schema: FieldSchema,
   boundaryFeaturesArg: Feature[],
   segmentFeaturesArg: Feature[],
-  enumerateOpts?: EnumerateOptions,
-  labelModel?: LabelModel
-): JointSequence {
-  const lm: LabelModel = labelModel ?? defaultLabelModel;
-  const lattice: VCell[][] = [];
+  enumerateOpts?: EnumerateOptions
+) {
   const stateSpaces: JointState[][] = [];
 
   for (let t = 0; t < spansPerLine.length; t++) {
@@ -240,10 +237,33 @@ export function decodeJointSequence(
     spanTextCache.push(textArray);
   }
 
+  return { stateSpaces, boundaryBase, spanFeatureCache, spanTextCache };
+}
+
+export type BeamEntry = { state: JointState; score: number }
+
+export function decodeWindowUsingCaches(
+  start: number,
+  endExclusive: number,
+  lines: string[],
+  featureWeights: Record<string, number>,
+  schema: FieldSchema,
+  caches: ReturnType<typeof prepareDecodeCaches>,
+  labelModel?: LabelModel,
+  incomingBeam?: BeamEntry[],
+  beamSize?: number
+): { path: JointState[]; outgoingBeam?: BeamEntry[] } {
+  const lm: LabelModel = labelModel ?? defaultLabelModel;
+  const windowSize = Math.max(1, endExclusive - start);
+  const lattice: VCell[][] = [];
+
+  // alias for caches
+  const { stateSpaces, boundaryBase, spanFeatureCache, spanTextCache } = caches;
+
   const emissionScores: Array<number[]> = [];
 
-  for (let t = 0; t < lines.length; t++) {
-    emissionScores[t] = [];
+  for (let t = start; t < endExclusive; t++) {
+    emissionScores[t - start] = [];
     for (let si = 0; si < stateSpaces[t]!.length; si++) {
       const s = stateSpaces[t]![si]!;
 
@@ -266,32 +286,43 @@ export function decodeJointSequence(
         }
       }
 
-      emissionScores[t]![si] = bcontrib + fcontrib;
+      emissionScores[t - start]![si] = bcontrib + fcontrib;
     }
   }
 
-  const startLineHasContent = (lines[0]?.trim().length ?? 0) > 0;
-  const startBoundaryBias = startLineHasContent ? 0.75 : 0;
+  // Build lattice for window
+  if (incomingBeam && incomingBeam.length > 0) {
+    // initialize from incoming beam using transition scores
+    lattice[0] = stateSpaces[start]?.map((s, idx) => {
+      let best = -Infinity
+      for (const be of incomingBeam) {
+        const tscore = transitionScore(be.state, s, featureWeights)
+        const emit = emissionScores[0]![idx] ?? -Infinity
+        const sc = be.score + tscore + emit
+        if (sc > best) best = sc
+      }
+      return { score: best, prev: null }
+    }) ?? []
+  } else {
+    lattice[0] = stateSpaces[start]?.map((s, idx) => {
+      const baseScore = emissionScores[0]![idx] ?? -Infinity;
+      const startLineHasContent = (lines[start]?.trim().length ?? 0) > 0;
+      const bias = s.boundary === 'B' ? (startLineHasContent ? 0.75 : 0) : 0;
+      return { score: baseScore + bias, prev: null };
+    }) ?? [];
+  }
 
-  lattice[0] = stateSpaces[0]?.map((s, idx) => {
-    const baseScore = emissionScores[0]![idx] ?? -Infinity;
-    const bias = s.boundary === 'B' ? startBoundaryBias : 0;
-    return { score: baseScore + bias, prev: null };
-  }) ?? [];
-
-  for (let t = 1; t < lines.length; t++) {
+  for (let t = 1; t < windowSize; t++) {
     lattice[t] = [];
-
-    for (let i = 0; i < stateSpaces[t]!.length; i++) {
+    for (let i = 0; i < stateSpaces[start + t]!.length; i++) {
       let bestScore = -Infinity;
       let bestPrev: number | null = null;
 
       const emit = emissionScores[t]![i] ?? -Infinity;
 
-      for (let j = 0; j < stateSpaces[t - 1]!.length; j++) {
-        const trans = transitionScore(stateSpaces[t - 1]![j]!, stateSpaces[t]![i]!, featureWeights);
+      for (let j = 0; j < stateSpaces[start + t - 1]!.length; j++) {
+        const trans = transitionScore(stateSpaces[start + t - 1]![j]!, stateSpaces[start + t]![i]!, featureWeights);
         const score = lattice[t - 1]![j]!.score + trans + emit;
-
         if (score > bestScore) {
           bestScore = score;
           bestPrev = j;
@@ -302,18 +333,45 @@ export function decodeJointSequence(
     }
   }
 
-  let lastIndex = lattice[lines.length - 1]!
-    .map((c, i) => ({ i, score: c.score }))
-    .sort((a, b) => b.score - a.score)[0]!.i;
+  // capture top-K beam at last timestep if requested
+  const lastCol = lattice[windowSize - 1] ?? []
+  const top = lastCol.map((c, i) => ({ i, score: c.score })).sort((a, b) => b.score - a.score)
 
+  if (top.length === 0) {
+    return { path: [], outgoingBeam: [] }
+  }
+
+  const outgoingBeam: BeamEntry[] = []
+  const k = Math.max(1, beamSize ?? 1)
+  for (let ii = 0; ii < Math.min(k, top.length); ii++) {
+    const entry = top[ii]!
+    const st = stateSpaces[start + windowSize - 1]![entry.i]
+    if (st) outgoingBeam.push({ state: st, score: entry.score })
+  }
+
+  let lastIndex = top[0]!.i
   const path: JointState[] = [];
-
-  for (let t = lines.length - 1; t >= 0; t--) {
-    path.unshift(stateSpaces[t]![lastIndex]!);
+  for (let t = windowSize - 1; t >= 0; t--) {
+    path.unshift(stateSpaces[start + t]![lastIndex]!);
     lastIndex = lattice[t]![lastIndex]!.prev!;
   }
 
-  return path;
+  return { path, outgoingBeam };
+}
+
+export function decodeJointSequence(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  featureWeights: Record<string, number>,
+  schema: FieldSchema,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  enumerateOpts?: EnumerateOptions,
+  labelModel?: LabelModel
+): JointSequence {
+  const caches = prepareDecodeCaches(lines, spansPerLine, featureWeights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts)
+  const res = decodeWindowUsingCaches(0, lines.length, lines, featureWeights, schema, caches, labelModel)
+  return res.path
 }
 
 export function extractJointFeatureVector(

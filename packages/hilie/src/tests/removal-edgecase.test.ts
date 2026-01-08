@@ -1,5 +1,5 @@
 import { spanGenerator } from '../lib/utils.js';
-import { decodeJointSequence, updateWeightsFromUserFeedback } from '../lib/viterbi.js';
+import { decodeFullViaStreaming, updateWeightsFromUserFeedback } from '../lib/viterbi.js';
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
 import { householdInfoSchema } from './test-helpers.js';
 
@@ -22,7 +22,7 @@ test('removal-edgecase deterministic negative update', () => {
   if (/\d{3}/.test(raw)) throw new Error('test precondition violated: contains digits');
 
   const w: any = { 'segment.is_phone': 0.0, 'segment.token_count_bucket': 0.1 };
-  const predBefore = decodeJointSequence(lines, spans, w, schema, bFeatures, sFeatures, { maxStates: 64 });
+  const predBefore = decodeFullViaStreaming(lines, spans, w, schema, bFeatures, sFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 64 } });
 
 
 

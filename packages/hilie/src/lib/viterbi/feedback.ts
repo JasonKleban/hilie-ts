@@ -11,17 +11,14 @@ import type {
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
 import { decodeJointSequence } from './core.js';
+import type { FeatureCandidate } from '../features.js'
+import { dynamicCandidatesToFeatures } from '../features.js'
 
-export function decodeJointSequenceWithFeedback(
+export function buildFeedbackContext(
   lines: string[],
   spansPerLine: LineSpans[],
-  weights: Record<string, number>,
-  schema: FieldSchema,
-  boundaryFeaturesArg: Feature[],
-  segmentFeaturesArg: Feature[],
-  feedback: Feedback,
-  enumerateOpts?: EnumerateOptions
-): { pred: JointSequence; spansPerLine: LineSpans[] } {
+  feedback: Feedback
+) {
   const normalizedFeedback = normalizeFeedback(feedback, lines);
   const feedbackEntities = normalizedFeedback.entities;
   const recordAssertions = normalizedFeedback.records;
@@ -156,8 +153,7 @@ export function decodeJointSequenceWithFeedback(
       // Calculate line-relative positions for the boundaries
       const startLineOffset = lineStarts[startLine] ?? 0
       const startInLine = fs - startLineOffset
-      const endLineOffset = lineStarts[endLine] ?? 0
-      const endInLine = (fe - 1) - endLineOffset
+      
       
       // Ensure the exact boundary positions exist as spans
       if (ensureLine(startLine)) {
@@ -232,7 +228,6 @@ export function decodeJointSequenceWithFeedback(
     const endLine = Math.max(startLine, Math.min(r.endLine, spansCopy.length - 1));
     for (let li = startLine; li <= endLine; li++) {
       const lineText = lines[li] ?? '';
-      const lineStartOffset = lineStarts[li] ?? 0;
       const liStart = 0;
       const liEnd = lineText.length;
       const arr = allowedIntervals[li] ?? (allowedIntervals[li] = []);
@@ -275,6 +270,120 @@ export function decodeJointSequenceWithFeedback(
     }
   }
 
+  // Enforce that exact asserted field spans are the canonical candidate for
+  // the line: remove any other candidate spans that overlap an asserted
+  // field interval so the decoder won't produce overlapping field spans.
+  for (const ent of feedbackEntities ?? []) {
+    for (const f of ent.fields ?? []) {
+      if (f.action === 'remove') continue;
+      if (f.start === undefined || f.end === undefined || f.lineIndex === undefined) continue;
+      const li = f.lineIndex;
+      if (li < 0 || li >= spansCopy.length) continue;
+      const line = spansCopy[li]!;
+      line.spans = line.spans.filter(sp => (sp.start === f.start && sp.end === f.end) || sp.end <= f.start || sp.start >= f.end);
+    }
+  }
+
+  // Additional sanitization: for asserted sub-entity intervals (allowedIntervals),
+  // replace candidate spans inside each interval with a coverage-style non-overlapping
+  // segmentation derived from the existing candidates so decoding cannot produce
+  // overlapping FieldSpans inside an asserted sub-entity.
+  for (const [liStr, intervals] of Object.entries(allowedIntervals)) {
+    const li = Number(liStr);
+    const line = spansCopy[li];
+    if (!line) continue;
+    const lineText = lines[li] ?? '';
+
+    for (const iv of intervals) {
+      const ivStart = Math.max(0, Math.min(iv.start, lineText.length));
+      const ivEnd = Math.max(0, Math.min(iv.end, lineText.length));
+
+      // collect spans that intersect the interval and clamp them to the interval
+      let inside = line.spans
+        .filter(sp => !(sp.end <= ivStart || sp.start >= ivEnd))
+        .map(sp => ({ start: Math.max(sp.start, ivStart), end: Math.min(sp.end, ivEnd) }))
+      inside.sort((a, b) => a.start - b.start);
+
+      // If no candidates inside, create a single span covering the allowed interval
+      if (inside.length === 0) inside = [{ start: ivStart, end: ivEnd }];
+
+      // Fill gaps to ensure coverage of the allowed interval
+      const filled: Array<{ start: number; end: number }> = [];
+      let pos = ivStart;
+      for (const sp of inside) {
+        if (pos < sp.start) filled.push({ start: pos, end: sp.start });
+        filled.push(sp);
+        pos = sp.end;
+      }
+      if (pos < ivEnd) filled.push({ start: pos, end: ivEnd });
+
+      // Trim leading/trailing whitespace within each filled span and add whitespace
+      // sub-spans where necessary to preserve exact coverage (mirrors coverageSpanGenerator logic)
+      const trimmed: Array<{ start: number; end: number }> = [];
+      for (const sp of filled) {
+        const txt = lineText.slice(sp.start, sp.end);
+        const isAllWhitespace = /^\s*$/.test(txt);
+        if (isAllWhitespace) {
+          trimmed.push({ start: sp.start, end: sp.end });
+        } else {
+          const leadingMatch = txt.match(/^\s*/);
+          const trailingMatch = txt.match(/\s*$/);
+          const leadingLen = leadingMatch ? leadingMatch[0].length : 0;
+          const trailingLen = trailingMatch ? trailingMatch[0].length : 0;
+          const tstart = sp.start + leadingLen;
+          const tend = sp.end - trailingLen;
+          if (tstart < tend) {
+            trimmed.push({ start: tstart, end: tend });
+            if (leadingLen > 0) trimmed.push({ start: sp.start, end: tstart });
+            if (trailingLen > 0) trimmed.push({ start: tend, end: sp.end });
+          } else {
+            trimmed.push(sp);
+          }
+        }
+      }
+
+      trimmed.sort((a, b) => a.start - b.start);
+
+      // Merge adjacent whitespace-only spans
+      const merged: Array<{ start: number; end: number }> = [];
+      for (const sp of trimmed) {
+        const txt = lineText.slice(sp.start, sp.end);
+        const isWs = /^\s*$/.test(txt);
+        if (isWs && merged.length > 0) {
+          const last = merged[merged.length - 1]!;
+          const lastTxt = lineText.slice(last.start, last.end);
+          const lastIsWs = /^\s*$/.test(lastTxt);
+          if (lastIsWs) {
+            last.end = sp.end;
+            continue;
+          }
+        }
+        merged.push({ start: sp.start, end: sp.end });
+      }
+
+      // Final normalization: ensure the merged spans are non-overlapping and
+      // coalesced deterministically (merge any overlapping/adjacent spans).
+      const normalized: Array<{ start: number; end: number }> = [];
+      for (const sp of merged.sort((a, b) => a.start - b.start)) {
+        if (normalized.length === 0) {
+          normalized.push({ start: sp.start, end: sp.end });
+          continue;
+        }
+        const last = normalized[normalized.length - 1]!;
+        if (sp.start <= last.end) {
+          // overlap/adjacent -> extend last
+          last.end = Math.max(last.end, sp.end);
+        } else {
+          normalized.push({ start: sp.start, end: sp.end });
+        }
+      }
+
+      // Replace spans inside the interval with the normalized coverage segmentation
+      const outside = line.spans.filter(sp => sp.end <= ivStart || sp.start >= ivEnd);
+      line.spans = [...outside, ...normalized].sort((a, b) => a.start - b.start);
+    }
+  }
+
   let maxAssertedSpanIdx = -1;
   for (const ent of feedbackEntities ?? []) {
     for (const f of ent.fields ?? []) {
@@ -286,24 +395,64 @@ export function decodeJointSequenceWithFeedback(
     }
   }
 
+  return {
+    spansCopy,
+    forcedLabelsByLine: forcedLabelsByLine,
+    forcedBoundariesByLine: forcedBoundariesByLine,
+    forcedEntityTypeByLine: entityTypeMap,
+    maxAssertedSpanIdx
+  };
+}
+
+export function decodeJointSequenceWithFeedback(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  weights: Record<string, number>,
+  schema: FieldSchema,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  feedback: Feedback,
+  enumerateOpts?: EnumerateOptions,
+  dynamicCandidates?: FeatureCandidate[],
+  dynamicInitialWeights?: Record<string, number>
+): { pred: JointSequence; spansPerLine: LineSpans[] } {
+  const fbCtx = buildFeedbackContext(lines, spansPerLine, feedback)
+  const spansCopy = fbCtx.spansCopy
+
+  let boundaryFeatures = [...boundaryFeaturesArg]
+  let segmentFeatures = [...segmentFeaturesArg]
+
+  if (dynamicCandidates && dynamicCandidates.length) {
+    const dyn = dynamicCandidatesToFeatures(dynamicCandidates)
+    boundaryFeatures = boundaryFeatures.concat(dyn.boundaryFeatures)
+    segmentFeatures = segmentFeatures.concat(dyn.segmentFeatures)
+  }
+
+  if (dynamicInitialWeights) {
+    for (const [k, v] of Object.entries(dynamicInitialWeights)) {
+      const dynKey = `dyn:${k}`
+      if (weights[dynKey] === undefined) weights[dynKey] = v
+    }
+  }
+
   const finalEnumerateOpts: EnumerateOptions | undefined = (() => {
     const base = enumerateOpts ?? {};
-    const safePrefix = (maxAssertedSpanIdx < 0)
+    const safePrefix = (fbCtx.maxAssertedSpanIdx < 0)
       ? base.safePrefix
-      : Math.max((base.safePrefix ?? 8), maxAssertedSpanIdx + 1);
+      : Math.max((base.safePrefix ?? 8), fbCtx.maxAssertedSpanIdx + 1);
     return {
       ...base,
       ...(safePrefix !== undefined ? { safePrefix } : {}),
-      forcedLabelsByLine,
-      forcedBoundariesByLine,
-      forcedEntityTypeByLine: entityTypeMap
+      forcedLabelsByLine: fbCtx.forcedLabelsByLine,
+      forcedBoundariesByLine: fbCtx.forcedBoundariesByLine,
+      forcedEntityTypeByLine: fbCtx.forcedEntityTypeByLine
     } as EnumerateOptions;
   })();
 
-  const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
+  const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, finalEnumerateOpts);
 
   for (let li = 0; li < pred.length; li++) {
-    const forcedType = entityTypeMap[li];
+    const forcedType = fbCtx.forcedEntityTypeByLine[li];
     if (!forcedType) continue;
     pred[li] = { ...(pred[li] ?? { boundary: 'C', fields: [] }), entityType: forcedType };
   }

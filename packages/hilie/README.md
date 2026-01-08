@@ -27,7 +27,26 @@ At its core, it does a *joint* Viterbi decode over:
 
 A short glossary for domain terms and named identifiers used across the codebase:
 
-- **Joint** — short for a joint decoding pass (see `decodeJointSequence`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels.
+## Streaming decoder
+
+Two streaming primitives are exposed:
+
+- `decodeNextRecord` — decode a single window starting at a given line using the provided lookahead.
+- `decodeRecordsStreaming` — iterate over the file to yield record segments one-by-one.
+
+### Beam and Beam Carryover 🔧
+
+- **`beam` (number):** The width of the beam used for carryover across decoding windows. A `beam` of `1` is equivalent to greedy decoding with no carryover. Larger values (e.g., `4`) allow the decoder to track multiple high-scoring hypotheses in parallel.
+
+- **`beam carryover`:** When enabled (via the `carryover` option), the decoder keeps a small beam of top-scoring partial states at the end of each decoded window and uses them as entry points for the next window. This avoids full re-computation of feature contributions across adjacent windows and preserves promising hypotheses that may span window boundaries.
+
+**Defaults and recommendations:**
+- Streaming limits the number of dynamic candidates by default (`dynamicCandidateLimit`: 50) to avoid performance blowups on large inputs.
+- If you need maximum throughput, prefer `beam: 1` and small candidate limits. If you need higher decoding quality across noisy boundaries, use `beam > 1` and `carryover: true` with a modest beam (e.g., `4`).
+
+## How the code maps to the idea
+
+- **Joint** — short for a joint decoding pass (see `decodeFullViaStreaming` or `decodeRecordsStreaming`). It simultaneously infers per-line boundary decisions (record boundaries) and per-span field labels.
 
 - **Annotation / feedback** — user-provided corrections. The preferred input shape is `FeedbackEntry[]` on `feedback.entries` (newest last). Use:
   - `decodeJointSequenceWithFeedback` to re-decode while keeping assertions stable
@@ -106,14 +125,14 @@ const schema: FieldSchema = {
 const lines = inputText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 const spans = spanGenerator(lines)
 
-const joint = decodeJointSequence(
+const joint = decodeFullViaStreaming(
   lines,
   spans,
   { ...defaultWeights },
   schema,
   boundaryFeatures,
   segmentFeatures,
-  { maxStates: 512, safePrefix: 6 }
+  { lookaheadLines: lines.length, enumerateOpts: { maxStates: 512, safePrefix: 6 } }
 )
 
 const records = entitiesFromJointSequence(lines, spans, joint, defaultWeights, segmentFeatures, schema)
@@ -163,20 +182,39 @@ const feedback = {
 // Then use the same helpers as above to decode with feedback or update weights.
 ```
 
+BREAKING CHANGE: `updateWeightsFromUserFeedback` and `decodeJointSequenceWithFeedback` now accept optional `dynamicCandidates` and `dynamicInitialWeights` as trailing arguments. These can be produced with `analyzeFileLevelFeatures(input)` and converted to runtime `Feature[]` using `dynamicCandidatesToFeatures`. If you don't need dynamic features, you can still call the functions without the new parameters.
+
+Note: The original public `decodeJointSequence` export has been removed in favor of streaming-based APIs. Use `decodeFullViaStreaming(...)` (for full-document decodes) or `decodeRecordsStreaming(...)` (streaming iteration) instead. The demo and tests were updated to use the streaming functions.
+
+BREAKING CHANGE (feedback semantics): when a `subEntity` (fileStart/fileEnd) assertion is present, the decoder now deterministically sanitizes candidate spans inside each asserted interval into a non-overlapping, coverage-style segmentation before decoding. This means:
+
+- Candidate spans that nest or strictly contain other candidate spans inside an asserted sub-entity will be replaced by a deterministic coverage segmentation derived from the existing candidates (clamped to the interval, gaps filled, whitespace trimmed, and adjacent whitespace merged).
+- As a result, decoding will no longer produce overlapping FieldSpans inside asserted sub-entities. This is a behavior change (not fully backward compatible) intended to make assertions precise and renderable without post-decode filtering.
+
+If you relied on older behavior that allowed multiple overlapping candidates inside asserted intervals, please adapt your feedback to the new semantics (for most workflows the change will reduce ambiguity and improve renderability).
+
 - Learn from corrections (updates weights):
 
 ```ts
 import { updateWeightsFromUserFeedback } from 'hilie'
+
+// Discover dynamic file-level features and default weights (breaking API: trainer accepts dynamic candidates)
+const { candidates, defaultWeights } = analyzeFileLevelFeatures(lines.join('\n'))
 
 const { updated: newWeights, pred: newJoint } = updateWeightsFromUserFeedback(
   lines,
   spans,
   joint,
   feedback,
-  { ...defaultWeights },
+  { ...defaultWeights, ...defaultWeights }, // merge or use existing
   boundaryFeatures,
   segmentFeatures,
-  schema
+  schema,
+  1.0, // learningRate
+  undefined, // enumerateOpts
+  0.15, // stabilizationFactor
+  candidates, // dynamicCandidates
+  defaultWeights // dynamicInitialWeights
 )
 ```
 

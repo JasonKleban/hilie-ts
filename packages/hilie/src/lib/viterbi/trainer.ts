@@ -13,6 +13,8 @@ import type {
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
 import { decodeJointSequence, extractJointFeatureVector } from './core.js';
+import type { FeatureCandidate } from '../features.js'
+import { dynamicCandidatesToFeatures } from '../features.js'
 
 export function updateWeightsFromUserFeedback(
   lines: string[],
@@ -25,21 +27,37 @@ export function updateWeightsFromUserFeedback(
   schema: FieldSchema,
   learningRate = 1.0,
   enumerateOpts?: EnumerateOptions,
-  stabilizationFactor = 0.15
+  stabilizationFactor = 0.15,
+  dynamicCandidates?: FeatureCandidate[],
+  dynamicInitialWeights?: Record<string, number>
 ): { updated: Record<string, number>; pred: JointSequence; spansPerLine?: LineSpans[] } {
   const normalizedFeedback = normalizeFeedback(feedback, lines);
   const feedbackEntities = normalizedFeedback.entities;
   const feedbackSubEntities = normalizedFeedback.subEntities;
   const recordAssertions = normalizedFeedback.records;
   const subEntityAssertions = normalizedFeedback.subEntities;
-
-
-
-
+  
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({
     lineIndex: s.lineIndex,
     spans: s.spans.map(sp => ({ start: sp.start, end: sp.end }))
   }));
+
+  // Merge dynamic features and default weights if provided (breaking, but convenient)
+  let boundaryFeatures = [...boundaryFeaturesArg]
+  let segmentFeatures = [...segmentFeaturesArg]
+
+  if (dynamicCandidates && dynamicCandidates.length) {
+    const dyn = dynamicCandidatesToFeatures(dynamicCandidates)
+    boundaryFeatures = boundaryFeatures.concat(dyn.boundaryFeatures)
+    segmentFeatures = segmentFeatures.concat(dyn.segmentFeatures)
+  }
+
+  if (dynamicInitialWeights) {
+    for (const [k, v] of Object.entries(dynamicInitialWeights)) {
+      const dynKey = `dyn:${k}`
+      if (weights[dynKey] === undefined) weights[dynKey] = v
+    }
+  }
 
   const feedbackTouchedSpans = new Set<string>();
 
@@ -218,10 +236,10 @@ export function updateWeightsFromUserFeedback(
       else {
         const predLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[0])
           ? (function findMatching() {
-              const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x => x.start === sp.start && x.end === sp.end);
-              if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? schema.noiseLabel;
-              return schema.noiseLabel as FieldLabel;
-            })()
+            const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x => x.start === sp.start && x.end === sp.end);
+            if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? schema.noiseLabel;
+            return schema.noiseLabel as FieldLabel;
+          })()
           : (schema.noiseLabel as FieldLabel);
         fields.push(predLabel);
       }
@@ -241,15 +259,15 @@ export function updateWeightsFromUserFeedback(
     spansCopy,
     weights,
     schema,
-    boundaryFeaturesArg,
-    segmentFeaturesArg,
+    boundaryFeatures,
+    segmentFeatures,
     effEnumerateOpts
   );
 
-  const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeaturesArg, segmentFeaturesArg, schema);
-  const vPred = extractJointFeatureVector(lines, spansCopy, predUnforced, boundaryFeaturesArg, segmentFeaturesArg, schema);
+  const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeatures, segmentFeatures, schema);
+  const vPred = extractJointFeatureVector(lines, spansCopy, predUnforced, boundaryFeatures, segmentFeatures, schema);
 
-  let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, finalEnumerateOpts);
+  let pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, finalEnumerateOpts);
 
   const assertedFields = ([] as any[]).concat((feedbackEntities ?? []).flatMap((e: any) => e.fields ?? []));
 
@@ -308,22 +326,22 @@ export function updateWeightsFromUserFeedback(
         }
       }
 
-      const spansSingle: LineSpans[] = origSpans.map((s: LineSpans | undefined, idx: number) => {
+      const spansSingle: LineSpans[] = origSpans.map((_s: LineSpans | undefined, idx: number) => {
         if (idx !== li) return { lineIndex: idx, spans: [] } as LineSpans;
         return { lineIndex: li, spans: [{ start: useStart, end: useEnd }] } as LineSpans;
       });
 
-      const jointPred: JointState[] = spansSingle.map((s: LineSpans, idx: number) => {
+      const jointPred: JointState[] = spansSingle.map((_s: LineSpans, idx: number) => {
         if (idx !== li) return { boundary: 'C', fields: [] } as JointState;
         return { boundary: 'C', fields: [f.fieldType as FieldLabel] } as JointState;
       });
-      const jointGold: JointState[] = spansSingle.map((s: LineSpans, idx: number) => {
+      const jointGold: JointState[] = spansSingle.map((_s: LineSpans, idx: number) => {
         if (idx !== li) return { boundary: 'C', fields: [] } as JointState;
         return { boundary: 'C', fields: [schema.noiseLabel] } as JointState;
       });
 
-      const vPredSpan = extractJointFeatureVector(lines, spansSingle, jointPred, boundaryFeaturesArg, segmentFeaturesArg, schema);
-      const vGoldSpan = extractJointFeatureVector(lines, spansSingle, jointGold, boundaryFeaturesArg, segmentFeaturesArg, schema);
+      const vPredSpan = extractJointFeatureVector(lines, spansSingle, jointPred, boundaryFeatures, segmentFeatures, schema);
+      const vGoldSpan = extractJointFeatureVector(lines, spansSingle, jointGold, boundaryFeatures, segmentFeatures, schema);
 
       const keys = new Set<string>([...Object.keys(vPredSpan), ...Object.keys(vGoldSpan)]);
       for (const k of keys) {
@@ -438,12 +456,12 @@ export function updateWeightsFromUserFeedback(
       }
     }
 
-    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOptsWithForces);
+    const newPred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, enumerateOptsWithForces);
     for (let i = 0; i < newPred.length; i++) if (newPred[i]) pred[i] = newPred[i]!;
   }
 
   function enforceAssertedPredictions(): JointSequence {
-    let predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOptsWithForces);
+    let predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, enumerateOptsWithForces);
 
     for (let iter = 0; iter < 2; iter++) {
       let changed = false;
@@ -469,7 +487,7 @@ export function updateWeightsFromUserFeedback(
       }
 
       if (!changed) break;
-      predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+      predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, effEnumerateOpts);
     }
 
     return predLocal;
@@ -478,6 +496,16 @@ export function updateWeightsFromUserFeedback(
   tryNudge('segment.is_phone', 'Phone');
   tryNudge('segment.is_email', 'Email');
   tryNudge('segment.is_extid', 'ExtID');
+
+  // Strong direct boosts for asserted fields: when a user explicitly adds a field
+  // with high confidence, apply a stronger label-feature bump so the model
+  // assigns significant probability to that label immediately.
+  for (const af of assertedFields.filter((x: any) => x.action !== 'remove')) {
+    const featId = labelFeatureMap[af.fieldType as string];
+    if (!featId) continue;
+    const boostScale = (af.confidence ?? 1.0) >= 0.8 ? 6.0 : 3.0;
+    weights[featId] = (weights[featId] ?? 0) + boostScale * learningRate * (af.confidence ?? 1.0);
+  }
 
   if (stabilizationFactor > 0) {
     for (let li = 0; li < spansPerLine.length; li++) {
@@ -550,7 +578,7 @@ export function updateWeightsFromUserFeedback(
   const ITER_BOUNDARY = 5;
 
   for (let iter = 0; iter < ITER_BOUNDARY; iter++) {
-    const freshCheck = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeaturesArg, segmentFeaturesArg, effEnumerateOpts);
+    const freshCheck = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, effEnumerateOpts);
     let anyChanged = false;
 
     for (const ent of feedbackEntities ?? []) {
@@ -610,8 +638,8 @@ export function updateWeightsFromUserFeedback(
     spansCopy,
     weights,
     schema,
-    boundaryFeaturesArg,
-    segmentFeaturesArg,
+    boundaryFeatures,
+    segmentFeatures,
     enumerateOpts
   );
 
@@ -681,4 +709,219 @@ export function updateWeightsFromUserFeedback(
   });
 
   return { updated: weights, pred: predAfterUpdate, spansPerLine: spansCopy };
+}
+
+// =======================
+// Record-level training utilities (streaming)
+// =======================
+
+export function updateWeightsForRecord(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  startLine: number,
+  endLine: number,
+  jointGold: JointSequence,
+  weights: Record<string, number>,
+  boundaryFeaturesArg: Feature[],
+  segmentFeaturesArg: Feature[],
+  schema: FieldSchema,
+  learningRate = 1.0,
+  dynamicCandidates?: FeatureCandidate[],
+  dynamicInitialWeights?: Record<string, number>,
+  regularizationLambda = 0.0,
+  applyUpdates = true
+): { updated: Record<string, number>; delta: Record<string, number>; pred: JointSequence } {
+  const windowLines = lines.slice(startLine, endLine)
+  const windowSpans = spansPerLine.slice(startLine, endLine)
+
+  // Merge dynamic features if provided
+  let bFeatures = [...boundaryFeaturesArg]
+  let sFeatures = [...segmentFeaturesArg]
+  if (dynamicCandidates && dynamicCandidates.length) {
+    const dyn = dynamicCandidatesToFeatures(dynamicCandidates)
+    bFeatures = bFeatures.concat(dyn.boundaryFeatures)
+    sFeatures = sFeatures.concat(dyn.segmentFeatures)
+  }
+
+  if (dynamicInitialWeights) {
+    for (const [k, v] of Object.entries(dynamicInitialWeights)) {
+      const dynKey = `dyn:${k}`
+      if (weights[dynKey] === undefined) weights[dynKey] = v
+    }
+  }
+
+  // Decode current prediction on the record window
+  const pred = decodeJointSequence(windowLines, windowSpans, weights, schema, bFeatures, sFeatures)
+
+  // Compute feature vectors
+  const vGold = extractJointFeatureVector(windowLines, windowSpans, jointGold, bFeatures, sFeatures, schema)
+  const vPred = extractJointFeatureVector(windowLines, windowSpans, pred, bFeatures, sFeatures, schema)
+
+  // Add simple label indicator features so updates can target label biases
+  for (let li = 0; li < windowSpans.length; li++) {
+    const spans = windowSpans[li] ?? { lineIndex: li, spans: [] } as any
+    const goldState = jointGold[li]
+    const predState = pred[li]
+
+    for (let si = 0; si < spans.spans.length; si++) {
+      const gLabel = (goldState && goldState.fields && goldState.fields[si]) ? goldState.fields[si] : schema.noiseLabel
+      const pLabel = (predState && predState.fields && predState.fields[si]) ? predState.fields[si] : schema.noiseLabel
+
+      if (gLabel && gLabel !== schema.noiseLabel) {
+        const key = `segment.is_${String(gLabel).toLowerCase()}`
+        vGold[key] = (vGold[key] ?? 0) + 1
+      }
+      if (pLabel && pLabel !== schema.noiseLabel) {
+        const key = `segment.is_${String(pLabel).toLowerCase()}`
+        vPred[key] = (vPred[key] ?? 0) + 1
+      }
+    }
+  }
+
+  const keys = new Set<string>([...Object.keys(vGold), ...Object.keys(vPred)])
+  const delta: Record<string, number> = {}
+  for (const k of keys) {
+    const d = (vGold[k] ?? 0) - (vPred[k] ?? 0)
+    const step = learningRate * d
+    delta[k] = step
+    if (applyUpdates) weights[k] = (weights[k] ?? 0) + step
+  }
+
+  // Ensure label indicator features receive a positive nudge when gold indicates a label
+  for (let li = 0; li < windowSpans.length; li++) {
+    const spans = windowSpans[li] ?? { lineIndex: li, spans: [] } as any
+    const goldState = jointGold[li]
+
+    for (let si = 0; si < spans.spans.length; si++) {
+      const gLabel = (goldState && goldState.fields && goldState.fields[si]) ? goldState.fields[si] : schema.noiseLabel
+      if (gLabel && gLabel !== schema.noiseLabel) {
+        const key = `segment.is_${String(gLabel).toLowerCase()}`
+        if ((delta[key] ?? 0) <= 0) {
+          const step = learningRate * 1.0
+          delta[key] = (delta[key] ?? 0) + step
+          if (applyUpdates) weights[key] = (weights[key] ?? 0) + step
+        }
+      }
+    }
+  }
+
+  // Apply L2 regularization as a weight decay term across existing weights and any computed deltas
+  if ((regularizationLambda ?? 0) > 0) {
+    const l2Keys = new Set<string>([...Object.keys(weights), ...Object.keys(delta)])
+    for (const k of l2Keys) {
+      const w = weights[k] ?? 0
+      if (w === 0) continue
+      const regStep = -learningRate * (regularizationLambda ?? 0) * w
+      delta[k] = (delta[k] ?? 0) + regStep
+      if (applyUpdates) weights[k] = (weights[k] ?? 0) + regStep
+    }
+  }
+
+  return { updated: weights, delta, pred }
+}
+
+export function trainDocument(
+  lines: string[],
+  spansPerLine: LineSpans[],
+  goldRecords: Array<{ startLine: number; endLine: number; jointGold: JointSequence }>,
+  weights: Record<string, number>,
+  boundaryFeatures: Feature[],
+  segmentFeatures: Feature[],
+  schema: FieldSchema,
+  opts?: { epochs?: number; learningRate?: number; shuffle?: boolean; batchSize?: number; regularizationLambda?: number; dynamicCandidates?: FeatureCandidate[]; dynamicInitialWeights?: Record<string, number>; learningRateSchedule?: { type: 'constant' | 'exponential' | 'linear'; factor?: number } }
+): { updated: Record<string, number>; history: Array<Record<string, number>> } {
+  const epochs = opts?.epochs ?? 1
+  const lr = opts?.learningRate ?? 1.0
+  const shuffle = opts?.shuffle ?? false
+  const history: Array<Record<string, number>> = []
+
+  const batchSize = opts?.batchSize ?? 1
+
+  for (let e = 0; e < epochs; e++) {
+    // compute learning rate for this epoch according to schedule
+    let epochLr = lr
+    const sched = opts?.learningRateSchedule
+    if (sched) {
+      if (sched.type === 'exponential') {
+        const factor = sched.factor ?? 0.5
+        epochLr = (opts?.learningRate ?? lr) * Math.pow(factor, e)
+      } else if (sched.type === 'linear') {
+        const base = opts?.learningRate ?? lr
+        const denom = Math.max(1, epochs - 1)
+        epochLr = base * (1 - (e / denom))
+      } else {
+        epochLr = opts?.learningRate ?? lr
+      }
+    }
+
+    let records = [...goldRecords]
+    if (shuffle) {
+      for (let i = records.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        const tmp = records[i] as typeof records[number]
+        records[i] = records[j] as typeof records[number]
+        records[j] = tmp
+      }
+    }
+
+    if (batchSize <= 1) {
+      for (const r of records) {
+        updateWeightsForRecord(
+          lines,
+          spansPerLine,
+          r.startLine,
+          r.endLine,
+          r.jointGold,
+          weights,
+          boundaryFeatures,
+          segmentFeatures,
+          schema,
+          epochLr,
+          opts?.dynamicCandidates,
+          opts?.dynamicInitialWeights,
+          opts?.regularizationLambda ?? 0
+        )
+      }
+    } else {
+      for (let i = 0; i < records.length; i += batchSize) {
+        const batch = records.slice(i, i + batchSize)
+        const baseWeights = { ...weights }
+        const deltaSum: Record<string, number> = {}
+
+        for (const r of batch) {
+          const res = updateWeightsForRecord(
+            lines,
+            spansPerLine,
+            r.startLine,
+            r.endLine,
+            r.jointGold,
+            baseWeights,
+            boundaryFeatures,
+            segmentFeatures,
+            schema,
+            epochLr,
+            opts?.dynamicCandidates,
+            opts?.dynamicInitialWeights,
+            opts?.regularizationLambda ?? 0,
+            false // do not apply updates while computing batch deltas
+          )
+
+          for (const [k, v] of Object.entries(res.delta)) {
+            deltaSum[k] = (deltaSum[k] ?? 0) + v
+          }
+        }
+
+        // apply average delta across batch
+        for (const [k, v] of Object.entries(deltaSum)) {
+          const avg = v / batch.length
+          weights[k] = (weights[k] ?? 0) + avg
+        }
+      }
+    }
+
+    // push snapshot of weights into history after epoch
+    history.push({ ...weights })
+  }
+
+  return { updated: weights, history }
 }

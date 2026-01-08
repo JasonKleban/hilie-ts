@@ -237,6 +237,43 @@ export function entitiesFromJointSequence(
         });
       }
 
+      // Enforce non-overlap among final assigned (non-NOISE) field spans.
+      // When the model has labeled multiple overlapping candidate spans on the
+      // same line, we deterministically select a subset to guarantee that the
+      // rendered fields never overlap, regardless of fieldType. Selection is
+      // greedy by descending confidence, with stable tie-breakers for
+      // determinism.
+      if (lineFields.length > 1) {
+        const nonNoise = lineFields.filter(f => f.fieldType !== schema.noiseLabel);
+        if (nonNoise.length > 1) {
+          // Sort by confidence desc, then start asc, then end desc to be deterministic
+          nonNoise.sort((a, b) => ((b.confidence ?? 0) - (a.confidence ?? 0)) || (a.start - b.start) || (b.end - a.end));
+          const chosen: { start: number; end: number }[] = [];
+          const keepSet = new Set<string>();
+          const overlaps = (aStart: number, aEnd: number, bStart: number, bEnd: number) => !(aEnd <= bStart || aStart >= bEnd);
+          for (const f of nonNoise) {
+            let ok = true;
+            for (const c of chosen) {
+              if (overlaps(f.start, f.end, c.start, c.end)) { ok = false; break }
+            }
+            if (ok) {
+              chosen.push({ start: f.start, end: f.end });
+              keepSet.add(`${f.start}:${f.end}`);
+            }
+          }
+          // Rebuild lineFields preserving noise spans and only the chosen non-noise spans
+          const rebuilt = lineFields.filter(f => (f.fieldType === schema.noiseLabel) || keepSet.has(`${f.start}:${f.end}`));
+          // Preserve original ordering by start then end
+          rebuilt.sort((a, b) => a.start - b.start || a.end - b.end);
+          // replace
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          // (we shadow lineFields purposely)
+          // @ts-ignore
+          lineFields.length = 0;
+          for (const rf of rebuilt) lineFields.push(rf);
+        }
+      }
+
       const last = subEntities[subEntities.length - 1];
 
       // Compute tight line bounds from any *non-NOISE* fields on this line. We

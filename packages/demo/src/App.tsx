@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import {
-  decodeJointSequence,
+  decodeFullViaStreaming,
   decodeJointSequenceWithFeedback,
+  analyzeFileLevelFeatures,
   entitiesFromJointSequence,
   candidateSpanGenerator,
   updateWeightsFromUserFeedback,
@@ -102,8 +103,13 @@ function App() {
 
         const decodeOpts = { maxStates: 512, safePrefix: 6 }
         
+        // wrapper that maps old decodeJointSequence signature to streaming helper
+        const decodeJointSequence = (lines: string[], spans: any, weights: any, schema: any, bF: any, sF: any, enumerateOpts?: any) =>
+          decodeFullViaStreaming(lines, spans, weights, schema, bF, sF, { lookaheadLines: lines.length, enumerateOpts })
+
         let pred: JointSequence
         if (feedbackEntries.length > 0) {
+          const analysis = analyzeFileLevelFeatures(linesArray.join('\n'))
           const result = decodeJointSequenceWithFeedback(
             linesArray,
             spans,
@@ -112,7 +118,9 @@ function App() {
             boundaryFeatures,
             segmentFeatures,
             { entries: feedbackEntries },
-            decodeOpts
+            decodeOpts,
+            analysis.candidates,
+            analysis.defaultWeights
           )
           pred = result.pred
         } else {

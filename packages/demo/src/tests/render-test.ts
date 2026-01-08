@@ -1,6 +1,9 @@
 import fs from 'fs'
 import path from 'path'
-import { candidateSpanGenerator, decodeJointSequence, entitiesFromJointSequence } from 'hilie'
+import { candidateSpanGenerator, decodeFullViaStreaming, entitiesFromJointSequence } from 'hilie'
+
+const decodeJointSequence = (lines: string[], spans: any, weights: any, schema: any, bFeatures: any, sFeatures: any, enumerateOpts?: any) =>
+  decodeFullViaStreaming(lines, spans, weights, schema, bFeatures, sFeatures, { lookaheadLines: lines.length, enumerateOpts: enumerateOpts })
 import { boundaryFeatures, segmentFeatures } from 'hilie'
 import { renderWithSpans } from '../renderInternal'
 import { householdInfoSchema } from '../schema'

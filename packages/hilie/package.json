@@ -10,7 +10,9 @@
     "build": "tsc -p .",
     "test": "npm run build && vitest run",
     "unit-test": "vitest run",
-    "generate": "npm run build && node dist/scripts/convert.js"
+    "generate": "npm run build && node dist/scripts/convert.js",
+    "benchmark:case1": "npm run build && node dist/scripts/benchmark-case1.js",
+    "benchmark:feedback": "npm run build && node dist/scripts/benchmark-feedback-sanitization.js"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",

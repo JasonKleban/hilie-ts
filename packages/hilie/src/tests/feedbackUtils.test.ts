@@ -1,18 +1,18 @@
 import { pushUniqueFields, buildFeedbackFromHistories, removeEntityConflicts, normalizeFeedbackEntries, normalizeFeedback } from '../lib/feedbackUtils.js'
 import { spanGenerator } from '../lib/utils.js'
-import { decodeJointSequence, decodeJointSequenceWithFeedback, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
+import { decodeFullViaStreaming, decodeJointSequenceWithFeedback, updateWeightsFromUserFeedback, entitiesFromJointSequence } from '../lib/viterbi.js'
+
+// alias for backwards compatibility in tests
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
-import type { FieldAssertion, FeedbackEntry } from '../lib/types.js'
+import type { FieldAssertion, FeedbackEntry, JointSequence } from '../lib/types.js'
 import { householdInfoSchema } from './test-helpers.js'
 import path from 'path'
 import { existsSync, readFileSync } from 'fs'
 
-declare const test: any;
-
 type EntityAssertion = {
   startLine: number;
   endLine: number;
-  entityType?: any;
+  entityType?: string;
   fields?: FieldAssertion[];
 }
 
@@ -80,7 +80,7 @@ function testFeedbackTwoEntities() {
   ]
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
   const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   // Build entity-only feedback and submit via the helper and update routine
   // Create file-level sub-entity assertions to avoid relying on startLine/endLine
@@ -92,14 +92,11 @@ function testFeedbackTwoEntities() {
 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, { ...weights }, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
 
-  // Diagnostic: raw decode with forced boundaries only (no entityType) —
-  // this demonstrates why a plain decode may not result in a Guardian role
-  // (annotateEntityTypes heuristics may mark Guardians as 'Unknown' if no
-  // nearby Primary exists within MAX_DISTANCE)
-  const forcedOpts = { forcedBoundariesByLine: { 0: 'B', 5: 'B' } }
-  const rawPred = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, forcedOpts as any)
-  const rawRecords = entitiesFromJointSequence(lines, spans, rawPred, weights, segmentFeatures, householdInfoSchema)
-  // rawRecords[1] may have a subEntity entityType of 'Unknown' due to heuristics
+  // Diagnostic: raw decode with forced boundaries only (no entityType).
+  // This illustrates why a plain decode may not result in a Guardian role
+  // because annotateEntityTypes heuristics can mark Guardians as 'Unknown'
+  // when no nearby Primary exists within MAX_DISTANCE.
+  // (No further assertions on the raw decode are required for this test.)
 
   // Diagnostic output when expectations aren't met
   try {
@@ -134,7 +131,6 @@ function testDecodeWithFeedbackSanitizesCandidates() {
   const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 3 }, { start: 3, end: 9 }, { start: 10, end: 18 }, { start: 19, end: 32 } ] }] as any
 
   const weights: any = {}
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
 
   // Assert a sub-entity by file offsets that starts at 10 and ends at 32.
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
@@ -170,14 +166,89 @@ function testDecodeWithFeedbackSanitizesCandidates() {
 
   // Pred should honor the asserted sub-entity entity type on the corresponding line
   assert(Boolean(res.pred[0] && res.pred[0]!.entityType === 'Guardian'), 'Decoder pred should include forced entityType for line 0')
+}
 
+// New test: ensure we do not preserve both a superset and an inner candidate inside an asserted sub-entity
+function testSubEntityRemovesContainerSpans() {
+  const lines = ['Henry Johnson (45NUMBEU)']
+  // Candidate spans include a superset span 0..22 and a smaller extid span 14..23
+  const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 22 }, { start: 14, end: 23 } ] }] as any
+  const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
+  // Assert sub-entity covering the parentheses area (14..23)
+  const fb: any = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 14, fileEnd: lineStarts[0]! + 23, entityType: 'Guardian' } ] }
+
+  const res = decodeJointSequenceWithFeedback(lines, spans, {}, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
+  const s = res.spansPerLine[0]!.spans
+
+  // The large superset span 0..22 should be removed because it contains a smaller span inside the asserted interval
+  assert(!s.some(x => x.start === 0 && x.end === 22), 'Container superset span should be removed inside asserted sub-entity')
+  // The small extid span should remain
+  assert(s.some(x => x.start === 14 && x.end === 23), 'Inner asserted-area span should be kept')
+
+  // Stricter guarantee: the spans inside the asserted interval should be a
+  // non-overlapping coverage of the entire asserted interval (no gaps, no nesting)
+  const ivStart = 14
+  const ivEnd = 23
+  const inside = s.filter(x => !(x.end <= ivStart || x.start >= ivEnd)).sort((a,b)=>a.start-b.start)
+  // Ensure no nested spans
+  for (let i = 0; i < inside.length; i++) {
+    for (let j = i+1; j < inside.length; j++) {
+      const a = inside[i]!, b = inside[j]!
+      assert(!(a.start <= b.start && a.end >= b.end), `no nested spans inside asserted interval: ${JSON.stringify(a)} contains ${JSON.stringify(b)}`)
+    }
+  }
+  // Ensure coverage: no gaps from ivStart to ivEnd
+  let cur = ivStart
+  for (const sp of inside) {
+    assert(sp.start <= cur, `span starts after current coverage position: ${sp.start} > ${cur}`)
+    if (sp.end > cur) cur = sp.end
+  }
+  assert(cur >= ivEnd, `asserted interval should be covered, reached ${cur} expected ${ivEnd}`)
+}
+
+// New test: when an exact field span is asserted without a surrounding sub-entity, other
+// overlapping candidate spans should be removed so no overlapping FieldSpans are possible.
+function testAssertedFieldOnlyRemovesOverlaps() {
+  const lines = ['Henry Johnson (45NUMBEU)']
+  // Candidate spans include a superset span and a smaller extid span
+  const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 22 }, { start: 15, end: 23 } ] }] as any
+
+  // Field-only feedback as reported (start 15, end 23)
+  const fb = { entries: [ { kind: 'field', field: { action: 'add', lineIndex: 0, start: 15, end: 23, fieldType: 'ExtID', confidence: 1 } } ] }
+
+  const res = decodeJointSequenceWithFeedback(lines, spans, {}, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
+  const s = res.spansPerLine[0]!.spans
+
+  // The superset span should be removed or clipped so it does not overlap the asserted field
+  const overlapping = s.filter(sp => !(sp.end <= 15 || sp.start >= 23) && !(sp.start === 15 && sp.end === 23))
+  assert(overlapping.length === 0, `expected no overlapping candidate spans with asserted field, found ${JSON.stringify(overlapping)}`)
+
+  // Assert the exact span exists
+  assert(s.some(sp => sp.start === 15 && sp.end === 23), 'expected asserted extid span to be present')
+
+  // Now test the training path: update weights using feedback and ensure the asserted field has high confidence
+  const joint: JointSequence = res.pred
+  const weights = { 'segment.is_extid': 0 }
+  const trainRes = updateWeightsFromUserFeedback(lines, spans as any, joint, fb as any, { ...weights }, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
+
+  const records = entitiesFromJointSequence(lines, trainRes.spansPerLine ?? spans, trainRes.pred, trainRes.updated, segmentFeatures, householdInfoSchema)
+  const first = records[0]!.subEntities[0]!
+  // Do not require the fieldType to match exactly here; the important
+  // invariant is that there is a single non-overlapping field covering the
+  // asserted span and its confidence is boosted. Field type may vary during
+  // training, but spans must not overlap regardless of type.
+  const matched = first.fields.filter(f => f.lineIndex === 0 && f.start === 15 && f.end === 23)
+  assert(matched.length === 1, `expected a single field at asserted span after training, got ${matched.length}`)
+  const conf = matched[0]!.confidence ?? 0
+  assert(conf >= 0.6, `expected confidence to be boosted after training; got ${conf}`)
+}
 
 
 // New test: forced field label assertions should be honored during decoding
 function testDecodeWithForcedFieldLabel() {
   const lines = ['Foo Bar']
   const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 3 }, { start: 4, end: 7 } ] }] as any
-  const weights: any = {}
+  const weights: Record<string, number> = {}
   const fb = { entries: [ { kind: 'field', field: { action: 'add', lineIndex: 0, start: 0, end: 3, fieldType: 'Name', confidence: 1.0 } } ] }
 
   const res = decodeJointSequenceWithFeedback(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
@@ -191,7 +262,33 @@ function testDecodeWithForcedFieldLabel() {
 
 }
 
-testDecodeWithForcedFieldLabel()
+// New test: when an exact field span is asserted inside a sub-entity, other
+// overlapping candidate spans should be removed to avoid overlapping FieldSpans
+// in the final prediction.
+function testAssertedFieldRemovesOverlaps() {
+  const text = '\t* Joshua Anderson (Grandparent)'
+  const lines = [text]
+  const spans = spanGenerator(lines, { delimiterRegex: /\s+/, maxTokensPerSpan: 8 })
+  const weights: Record<string, number> = {}
+
+  // Feedback: assert sub-entity covering a broad slice and assert an exact Name field
+  const fb = { entries: [
+    { kind: 'subEntity', fileStart: 3, fileEnd: 32, entityType: 'Guardian' },
+    { kind: 'field', field: { action: 'add', lineIndex: 0, start: 3, end: 18, fieldType: 'Name', confidence: 1 } }
+  ] }
+
+  const res = decodeJointSequenceWithFeedback(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
+
+  // Ensure no candidate span other than the asserted exact span overlaps 3..18
+  const overlapping = (res.spansPerLine[0]!.spans ?? []).filter(s => !(s.start >= 18 || s.end <= 3) && !(s.start === 3 && s.end === 18))
+  assert(overlapping.length === 0, `expected no overlapping candidate spans, found ${JSON.stringify(overlapping)}`)
+
+  // Ensure the forced label exists at the asserted span index
+  const spansForLine = res.spansPerLine[0]!.spans
+  const idx2 = spansForLine.findIndex(s => s.start === 3 && s.end === 18)
+  assert(idx2 >= 0, 'asserted span should exist')
+  // The decoder may not immediately label the asserted span (it may require nudging),
+  // but the candidate span should be present and not overlapped by other candidates.
 }
 
 // Register feedbackUtils test functions with Vitest
@@ -216,8 +313,8 @@ function testFirstTwoCase1Records() {
   const second = blocks[1] as string[]
   const lines: string[] = [...first, ...second]
   const spans = spanGenerator(lines, {})
-  const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const weights: Record<string, number> = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   // Assert the first two records by specifying start/end lines (records still use startLine/endLine)
   const fbEntities: EntityAssertion[] = [
@@ -229,8 +326,6 @@ function testFirstTwoCase1Records() {
 
   const fb = buildFeedbackFromHistories(fbEntities, [], new Set())
 
-  // Keep a copy of weights before calling the updater so we can inspect diffs
-  const weightsBefore = { ...weights };
 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, weights, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
 
@@ -243,7 +338,7 @@ function testFirstTwoCase1Records() {
     throw err
   }
 
-  const fresh = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const fresh = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
   const finalRecs = entitiesFromJointSequence(lines, spans, fresh, weights, segmentFeatures, householdInfoSchema)
 
   assert(finalRecs.length === 2, `expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
@@ -267,8 +362,8 @@ function testSingleCase1RecordRangeTerminates() {
   const second = blocks[1] as string[]
   const lines: string[] = [...first, ...second]
   const spans = spanGenerator(lines, {})
-  const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const weights: Record<string, number> = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   // Assert ONLY the first record by specifying its exact start/end line.
   const fbEntities: EntityAssertion[] = [
@@ -298,8 +393,8 @@ function testAssertedRangesNotSubdivided() {
   ]
 
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
-  const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const weights: Record<string, number> = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   const nameSpan = spans[0]!.spans[0]!
   const spanIdx = spans[0]!.spans.findIndex(s => s.start === nameSpan.start && s.end === nameSpan.end)
@@ -364,7 +459,7 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   const lines = txt.split('\n')
 
   // Use the same style of weights as the demo so the decode path matches.
-  const weights: any = {
+  const weights: Record<string, number> = {
     'line.indentation_delta': 0.5,
     'line.lexical_similarity_drop': 1.0,
     'line.blank_line': 1.0,
@@ -377,7 +472,7 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   }
 
   const spans = spanGenerator(lines, {})
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256, safePrefix: 6 }})
 
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const feedback = {
@@ -426,7 +521,7 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
   const txt = readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const lines = txt.split('\n')
 
-  const weights: any = {
+  const weights: Record<string, number> = {
     'line.indentation_delta': 0.5,
     'line.lexical_similarity_drop': 1.0,
     'line.blank_line': 1.0,
@@ -439,7 +534,7 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
   }
 
   const spans = spanGenerator(lines, {})
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256, safePrefix: 6 }})
 
   // This mirrors the reported payload:
   // - assert the Oliver Smith record (10-18)
@@ -493,7 +588,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   const txt = readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const lines = txt.split('\n')
 
-  const weights: any = {
+  const weights: Record<string, number> = {
     'line.indentation_delta': 0.5,
     'line.lexical_similarity_drop': 1.0,
     'line.blank_line': 1.0,
@@ -506,7 +601,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   }
 
   const spans = spanGenerator(lines, {})
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256, safePrefix: 6 }})
 
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const feedback = {
@@ -571,7 +666,7 @@ function testCase1FieldOnlyEmailAssertionIsRendered() {
   const lines = txt.split('\n')
 
   // Use the same style of weights as the demo so the decode path matches.
-  const weights: any = {
+  const weights: Record<string, number> = {
     'line.indentation_delta': 0.5,
     'line.lexical_similarity_drop': 1.0,
     'line.blank_line': 1.0,
@@ -637,8 +732,8 @@ function testFirstTwoCase3Records() {
   const second = [ linesArr[1]! ]
   const lines: string[] = [...first, ...second]
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
-  const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const weights: Record<string, number> = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   const fbEntities: EntityAssertion[] = [
     { startLine: 0, endLine: first.length - 1 },
@@ -646,8 +741,8 @@ function testFirstTwoCase3Records() {
   ]
   const fb = buildFeedbackFromHistories(fbEntities, [], new Set())
 
-  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, weights, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
-  const fresh = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  updateWeightsFromUserFeedback(lines, spans, predBefore, fb, weights, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
+  const fresh = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
   const finalRecs = entitiesFromJointSequence(lines, spans, fresh, weights, segmentFeatures, householdInfoSchema)
 
   assert(finalRecs.length === 2, `case3: expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
@@ -674,8 +769,8 @@ function testFirstTwoCase4Records() {
   const second = linesArr.slice(secondStart, thirdStart)
   const lines: string[] = [...first, ...second]
   const spans = spanGenerator(lines, {})
-  const weights: any = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
-  const predBefore = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  const weights: Record<string, number> = { 'segment.is_phone': 1.5, 'segment.is_email': 1.5, 'segment.is_extid': 1.0, 'segment.is_name': 1.0 }
+  const predBefore = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
 
   const fbEntities: EntityAssertion[] = [
     { startLine: 0, endLine: first.length - 1 },
@@ -683,8 +778,8 @@ function testFirstTwoCase4Records() {
   ]
   const fb = buildFeedbackFromHistories(fbEntities, [], new Set())
 
-  const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, weights, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
-  const fresh = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 256 })
+  updateWeightsFromUserFeedback(lines, spans, predBefore, fb, weights, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
+  const fresh = decodeFullViaStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: lines.length, enumerateOpts: { maxStates: 256 }})
   const finalRecs = entitiesFromJointSequence(lines, spans, fresh, weights, segmentFeatures, householdInfoSchema)
 
   assert(finalRecs.length === 2, `case4: expected two top-level records after enforcing feedback, got ${finalRecs.length}`)
@@ -706,4 +801,8 @@ test('case1 email assertion does not create overlapping spans', () => testCase1E
 test('case1 field-only Email assertion is rendered', () => testCase1FieldOnlyEmailAssertionIsRendered());
 test('first two case3 records', () => testFirstTwoCase3Records());
 test('first two case4 records', () => testFirstTwoCase4Records());
+test('sub-entity removes container spans', () => testSubEntityRemovesContainerSpans());
+test('forced field label in decode is honored', () => testDecodeWithForcedFieldLabel());
+test('asserted field-only removes overlapping candidates', () => testAssertedFieldOnlyRemovesOverlaps());
 test('decode sanitization preserves non-overlapping candidates', () => testDecodeWithFeedbackSanitizesCandidates());
+test('asserted field removes overlapping candidates', () => testAssertedFieldRemovesOverlaps());

@@ -1,7 +1,11 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { entitiesFromJointSequence, decodeJointSequence, spanGenerator } from '../index.js';
+import { decodeFullViaStreaming, spanGenerator } from '../index.js';
+import { entitiesFromJointSequence } from '../lib/viterbi.js';
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js';
+
+const decodeJointSequence = (lines: string[], spans: any, weights: any, schema: any, bFeatures: any, sFeatures: any, enumerateOpts?: any) =>
+  decodeFullViaStreaming(lines, spans, weights, schema, bFeatures, sFeatures, { lookaheadLines: lines.length, enumerateOpts: enumerateOpts })
 import { householdInfoSchema } from './test-helpers.js';
 
 const bFeatures = boundaryFeatures;
@@ -56,12 +60,14 @@ async function runDataDrivenTests() {
     const spansPerLine = spanGenerator(lines);
 
     const jointSeq = decodeJointSequence(lines, spansPerLine, jointWeights, householdInfoSchema, bFeatures, sFeatures, { maxStates: 512, safePrefix: 6 });
-
     const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights, sFeatures, householdInfoSchema);
 
-    records.slice(0, 3).forEach((record, i) => {
-      // Diagnostic output removed for cleaner test output
-    });
+    console.info(`decoded ${records.length} records, spans lines ${spansPerLine.length}`);
+
+
+
+
+
   }
 }
 
