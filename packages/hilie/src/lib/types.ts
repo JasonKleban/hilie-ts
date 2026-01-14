@@ -88,7 +88,7 @@ export interface EnumerateOptions {
   // Optional per-line forced boundary map. Keyed by lineIndex -> 'B'|'C'
   forcedBoundariesByLine?: Record<number, BoundaryState>;
   // Optional per-line forced entity type (e.g., Primary/Guardian/Unknown)
-  forcedEntityTypeByLine?: Record<number, SubEntityType>;
+  forcedEntityTypeByLine?: Record<number, EntityType>;
 }
 
 export type EntityType = 'Primary' | 'Guardian' | 'Unknown';

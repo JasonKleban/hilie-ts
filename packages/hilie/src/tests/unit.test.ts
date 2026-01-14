@@ -174,11 +174,11 @@ test('decoded sub-entities should be tight to non-noise field spans', () => {
 
   let found = false
   for (const r of records) {
-    for (const se of (r.subEntities ?? [])) {
+    for (const se of (r.entities ?? [])) {
       if ((se.fields ?? []).length > 0) {
         const minF = Math.min(...se.fields.map(f => f.fileStart ?? Infinity))
         const maxF = Math.max(...se.fields.map(f => f.fileEnd ?? -Infinity))
-        ok(se.fileStart === minF && se.fileEnd === maxF, `expected tight bounds for sub-entity, got ${se.fileStart}-${se.fileEnd} vs fields ${minF}-${maxF}`)
+        ok(se.fileStart === minF && se.fileEnd === maxF, `expected tight bounds for entity, got ${se.fileStart}-${se.fileEnd} vs fields ${minF}-${maxF}`)
         found = true
         break
       }
@@ -215,7 +215,7 @@ test('detect fields outside subEntity bounds (regression)', () => {
 
   let detected = false
   for (const r of badDecoded) {
-    for (const se of (r.subEntities ?? [])) {
+    for (const se of (r.entities ?? [])) {
       for (const f of (se.fields ?? [])) {
         if ((f.fileStart ?? 0) < (se.fileStart ?? 0) || (f.fileEnd ?? 0) > (se.fileEnd ?? 0)) {
           detected = true
@@ -253,14 +253,14 @@ test('assembleRecordsFromCandidates matches entitiesFromJointSequence', () => {
   const recsNew = assembleRecordsFromCandidates(linesArr, spans, 0, jointPath, spanCandidates, weights, sFeatures, schema)
 
   ok(recsLegacy.length === recsNew.length, 'record counts should match')
-  if (recsLegacy.length > 0 && recsLegacy[0]?.subEntities?.length && recsNew[0]?.subEntities?.length) {
-    const a = recsLegacy[0]!.subEntities[0]!;
-    const b = recsNew[0]!.subEntities[0]!;
-    ok(!!a && !!b, 'both legacy and new recs should have subEntities to compare')
-    ok(a.fields.length === b.fields.length, 'first subentity should have same number of fields')
-    ok(a.fileStart === b.fileStart && a.fileEnd === b.fileEnd, 'subentity bounds should match')
+  if (recsLegacy.length > 0 && recsLegacy[0]?.entities?.length && recsNew[0]?.entities?.length) {
+    const a = recsLegacy[0]!.entities[0]!;
+    const b = recsNew[0]!.entities[0]!;
+    ok(!!a && !!b, 'both legacy and new recs should have entities to compare')
+    ok(a.fields.length === b.fields.length, 'first entity should have same number of fields')
+    ok(a.fileStart === b.fileStart && a.fileEnd === b.fileEnd, 'entity bounds should match')
   } else {
-    ok(recsLegacy.length === 0 && recsNew.length === 0, 'either both are empty or both have sub-entities')
+    ok(recsLegacy.length === 0 && recsNew.length === 0, 'either both are empty or both have entities')
   }
 
 });
@@ -286,7 +286,7 @@ test('rendering duplication check: no duplicate raw spans found', () => {
   // Simulate rendering with dedupe: gaps before sub-entities and NOISE fields produce raw spans
   for (const r of records) {
     let lastEnd = r.fileStart
-    for (const se of (r.subEntities ?? [])) {
+    for (const se of (r.entities ?? [])) {
       if (lastEnd < (se.fileStart ?? 0)) addRaw(lastEnd, se.fileStart ?? 0)
       let localEnd = se.fileStart ?? 0
       for (const f of (se.fields ?? [])) {
@@ -470,14 +470,14 @@ test('Primary/Guardian grouping into a top-level record with sub-entities', () =
   ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
 
   const rec = records[0]!;
-  ok(Array.isArray(rec.subEntities) && rec.subEntities.length === 2, 'record should contain two sub-entities (Primary + Guardian)');
+  ok(Array.isArray(rec.entities) && rec.entities.length === 2, 'record should contain two entities (Primary + Guardian)');
 
-  ok(rec.subEntities[0]!.entityType === 'Primary', 'first sub-entity should be Primary');
-  ok(rec.subEntities[1]!.entityType === 'Guardian', 'second sub-entity should be Guardian');
+  ok(rec.entities[0]!.entityType === 'Primary', 'first entity should be Primary');
+  ok(rec.entities[1]!.entityType === 'Guardian', 'second entity should be Guardian');
 
   // Ensure span start/end positions and entity-relative positions are present
-  const allFields = rec.subEntities.flatMap(s => s.fields);
-  ok(allFields.length >= 1, 'record should contain fields in its sub-entities');
+  const allFields = rec.entities.flatMap(s => s.fields);
+  ok(allFields.length >= 1, 'record should contain fields in its entities');
   for (const f of allFields) {
     ok(typeof f.start === 'number' && typeof f.end === 'number', 'field start/end positions present');
     ok(typeof f.fileStart === 'number' && typeof f.fileEnd === 'number', 'file-relative positions present');
@@ -499,8 +499,8 @@ test('entitiesFromJointSequence and feedback-based training', () => {
   ok(Array.isArray(rec.entities) && rec.entities.length >= 1, 'record should contain entities');
 
   // flatten fields and check
-  const allFields = rec.subEntities.flatMap(s => s.fields);
-  ok(allFields.length >= 1, 'record should contain fields in its sub-entities');
+  const allFields = rec.entities.flatMap(s => s.fields);
+  ok(allFields.length >= 1, 'record should contain fields in its entities');
   for (const f of allFields) {
     ok(f.fileStart >= 0 && f.fileEnd > f.fileStart, 'field file-relative positions present');
     ok(f.entityStart !== undefined && f.entityEnd !== undefined, 'entity-relative positions present');
@@ -531,7 +531,7 @@ test('entitiesFromJointSequence and feedback-based training', () => {
   // Expect either the returned prediction to reflect the asserted Phone label
   // or that the phone detection weight was increased by the update.
   try {
-    const hasPhone = predAfter.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Phone')));
+    const hasPhone = predAfter.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Phone')));
     if (!hasPhone) {
       ok((w2['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0), 'after feedback-based update either pred includes Phone or phone weight increased')
     }
@@ -548,7 +548,7 @@ test('feedback remove action decreases weights and removes prediction', () => {
   const w: Record<string, number> = { 'segment.is_phone': 5.0, 'segment.token_count_bucket': 0.1 };
   const predBefore = decodeFullViaStreaming(lines, spans, w, schema, bFeatures, sFeatures, { enumerateOpts: { maxStates: 64 }});
   const predBeforeRecs = predBefore as RecordSpan[]
-  ok(predBeforeRecs.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Phone'))), 'sanity: predBefore picks Phone');
+  ok(predBeforeRecs.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Phone'))), 'sanity: predBefore picks Phone');
 
   const phoneSpan = spans[0]!.spans.find(s => /\d{3,}/.test(lines[0]!.slice(s.start, s.end)));
   ok(!!phoneSpan, 'found phone-like span');
@@ -567,7 +567,7 @@ test('feedback remove action decreases weights and removes prediction', () => {
     ok(Boolean(res.spansPerLine && res.spansPerLine[0] && res.spansPerLine[0]!.spans.length === originalCount - 1), 'after remove feedback the candidate spans list should reflect the removed span');
     // And ensure no remaining predicted field corresponds to the removed span offsets
     const predRecs = res.pred as RecordSpan[];
-    const hasRemoved = predRecs.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fileStart === (phoneSpan!.start) && f.fileEnd === (phoneSpan!.end))));
+    const hasRemoved = predRecs.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fileStart === (phoneSpan!.start) && f.fileEnd === (phoneSpan!.end))));
     ok(!hasRemoved, 'removed span should not appear in returned records')
   } catch (err) {
     console.warn('Non-deterministic removal behavior; skipping strict assertion on predicted fields')
@@ -633,15 +633,15 @@ test('assert ExtID then Name on same line and ensure both persist when both are 
   const feedback1 : Feedback = { entries: [ { kind: 'field', field: { lineIndex: 0, start: 15, end: 23, fieldType: 'ExtID', confidence: 1.0, action: 'add' } } ] };
   const res1 = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback1, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 64 });
 
-  ok((res1.pred as RecordSpan[]).some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'ExtID'))), 'after ExtID add the decoder should predict ExtID');
+  ok((res1.pred as RecordSpan[]).some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'ExtID'))), 'after ExtID add the decoder should predict ExtID');
 
   // Second feedback: assert Name on 'Henry' AND include the prior ExtID assertion as part of the entity submission
   const feedback2 : Feedback = { entries: [ { kind: 'field', field: { lineIndex: 0, start: 15, end: 23, fieldType: 'ExtID', confidence: 1.0, action: 'add' } }, { kind: 'field', field: { lineIndex: 0, start: 0, end: 5, fieldType: 'Name', confidence: 1.0, action: 'add' } } ] };
 
   const res2 = updateWeightsFromUserFeedback(lines, spans, res1.pred, feedback2, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 64 });
 
-  ok((res2.pred as RecordSpan[]).some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'ExtID'))), 'ExtID should still be present after the Name add when both are submitted');
-  ok((res2.pred as RecordSpan[]).some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Name'))), 'Name should be present after the second feedback');
+  ok((res2.pred as RecordSpan[]).some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'ExtID'))), 'ExtID should still be present after the Name add when both are submitted');
+  ok((res2.pred as RecordSpan[]).some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Name'))), 'Name should be present after the second feedback');
 
   console.log('✓ ExtID then Name assertions are preserved when both submitted');
 });
@@ -686,7 +686,7 @@ test('multiple assertions in one entity (extid, email, phone) increase correspon
 
   // The update should either increase the detector weight OR the asserted label should already be predicted.
   const predAfter = res.pred as any[];
-  const hasExtEmailPhone = predAfter.some(r => (r.subEntities ?? []).some((se: any) => se.fields.some((f: any) => ['ExtID','Email','Phone'].includes(f.fieldType))));
+  const hasExtEmailPhone = predAfter.some(r => (r.entities ?? []).some((se: any) => se.fields.some((f: any) => ['ExtID','Email','Phone'].includes(f.fieldType))));
   ok((w['segment.is_extid'] ?? 0) > (before['segment.is_extid'] ?? 0) || hasExtEmailPhone, 'extid weight increased or ExtID predicted');
   ok((w['segment.is_email'] ?? 0) > (before['segment.is_email'] ?? 0) || hasExtEmailPhone, 'email weight increased or Email predicted');
   ok((w['segment.is_phone'] ?? 0) > (before['segment.is_phone'] ?? 0) || hasExtEmailPhone, 'phone weight increased or Phone predicted');
@@ -704,26 +704,26 @@ test('Assertion reflection: asserted Email should appear immediately and in a fr
 
   const w: Record<string, number> = { 'segment.is_email': -5.0, 'segment.token_count_bucket': 0.1 };
   const predBefore = decodeFullViaStreaming(lines, spans, w, schema, bFeatures, sFeatures, { enumerateOpts: { maxStates: 32 }}) as RecordSpan[];
-  ok(!predBefore.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'sanity: adversarial weights do not predict Email');
+  ok(!predBefore.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'sanity: adversarial weights do not predict Email');
 
   const feedback : Feedback = { entries: [ { kind: 'field', field: { lineIndex: 0, start: emailSpan!.start, end: emailSpan!.end, fieldType: 'Email', action: 'add', confidence: 1 } } ] };
 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 32 });
 
   const reflected = res.pred as RecordSpan[];
-  ok(reflected.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'post-feedback prediction should reflect asserted Email');
+  ok(reflected.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'post-feedback prediction should reflect asserted Email');
 
   let fresh = decodeFullViaStreaming(lines, spans, w, schema, bFeatures, sFeatures, { enumerateOpts: { maxStates: 32 }}) as RecordSpan[];
   // If a single update doesn't flip the fresh decode, allow up to 3 additional nudges
   let attempts = 0;
-  while (!fresh.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))) && attempts < 3) {
+  while (!fresh.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))) && attempts < 3) {
     attempts++;
     const res2 = updateWeightsFromUserFeedback(lines, spans, res.pred, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 32 });
     fresh = decodeFullViaStreaming(lines, spans, w, schema, bFeatures, sFeatures, { enumerateOpts: { maxStates: 32 }}) as RecordSpan[];
     // use updated prediction as the base for the next nudge
     res.pred = res2.pred;
   }
-  ok(fresh.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'fresh decode with updated weights should predict Email (after nudging)');
+  ok(fresh.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.fieldType === 'Email'))), 'fresh decode with updated weights should predict Email (after nudging)');
 
   console.log('✓ asserted Email reflected immediately and in fresh decode');
 });
@@ -776,7 +776,7 @@ test('Regression: case3 feedback (remove NOISE + add Email) should not drop all 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, feedback, w, bFeatures, sFeatures, schema, 1.0, { maxStates: 256 });
 
   const recForLine = (res.pred as any[]).find(r => r.startLine <= lineIndex && r.endLine >= lineIndex)
-  const predFields = recForLine ? recForLine.subEntities.flatMap((se:any) => (se.fields ?? []).filter((f:any) => f.lineIndex === lineIndex).map((f:any) => f.fieldType)) : [];
+  const predFields = recForLine ? recForLine.entities.flatMap((se:any) => (se.fields ?? []).filter((f:any) => f.lineIndex === lineIndex).map((f:any) => f.fieldType)) : [];
 
   ok(Boolean(recForLine), 'prediction should exist for line after feedback');
   ok(predFields.length > 0, 'feedback should not clear all predicted spans');

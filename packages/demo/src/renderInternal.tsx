@@ -1,12 +1,12 @@
 import type { ReactNode } from 'react'
-import type { RecordSpan, SubEntitySpan, FeedbackEntry } from 'hilie'
+import type { RecordSpan, FeedbackEntry } from 'hilie'
 
 export interface RenderOptions {
   text: string
   records: RecordSpan[]
   feedbackEntries: FeedbackEntry[]
   hoverState: {
-    type: 'field' | 'subEntity' | 'record' | null
+    type: 'field' | 'entity' | 'record' | null
     value: string | null
     spanId?: string
   }
@@ -28,8 +28,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
     if (entry.kind === 'record') {
       const key = `record-${entry.startLine}-${entry.endLine}`
       feedbackSpanMap.set(key, true)
-    } else if (entry.kind === 'subEntity') {
-      const key = `subEntity-${entry.fileStart}-${entry.fileEnd}-${entry.entityType}`
+    } else if (entry.kind === 'entity') {
+      const key = `entity-${entry.fileStart}-${entry.fileEnd}-${entry.entityType}`
       feedbackSpanMap.set(key, true)
     } else if (entry.kind === 'field') {
       const f = entry.field
@@ -116,11 +116,11 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       const subStart = entity.fileStart ?? recordStart
       const subEnd = entity.fileEnd ?? recordEnd
 
-      // Text before subentity (only render if there's actually a gap)
-      // Avoid duplicating text that will also be rendered as fields inside the subentity.
+        // Text before entity (only render if there's actually a gap)
+      // Avoid duplicating text that will also be rendered as fields inside the entity.
       let preEnd = subStart
-      if (subEntity.fields && subEntity.fields.length > 0) {
-        const earliestFieldStart = Math.min(...subEntity.fields.map(f => (f.fileStart ?? Number.MAX_SAFE_INTEGER)))
+      if (entity.fields && entity.fields.length > 0) {
+        const earliestFieldStart = Math.min(...entity.fields.map(f => (f.fileStart ?? Number.MAX_SAFE_INTEGER)))
         if (earliestFieldStart < preEnd) preEnd = earliestFieldStart
       }
       if (preEnd > lastOffset) {

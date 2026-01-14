@@ -32,7 +32,7 @@ const records = entitiesFromJointSequence(lines, spans, pred, weights, segmentFe
 for (const r of records) {
   if (r.fileStart === 84 && r.fileEnd === 97) {
     console.log('Record', r.fileStart, r.fileEnd)
-    for (const s of (r.subEntities ?? [])) {
+    for (const s of (r.entities ?? [])) {
       console.log('  Sub', s.entityType, s.fileStart, s.fileEnd)
       for (const f of (s.fields ?? [])) {
         console.log('    Field', f.fieldType, f.fileStart, f.fileEnd)

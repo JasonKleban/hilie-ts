@@ -15,7 +15,7 @@ const lines = [
 const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
 const weights: any = {}
 const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
-const fb: any = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
+const fb: any = { entries: [ { kind: 'entity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
 
 const ITER = 200
 console.log('Benchmark: decodeFullViaStreaming (no feedback)')

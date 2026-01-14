@@ -19,9 +19,9 @@ test('streaming decode with cross-window sub-entity assertion produces coverage'
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
   const weights: Record<string, number> = {}
 
-  // Build a sub-entity assertion that covers lines 0..2 via file offsets
+  // Build an entity assertion that covers lines 0..2 via file offsets
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
-  const fb: Feedback = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
+  const fb: Feedback = { entries: [ { kind: 'entity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
 
   // Use small lookahead to force windowed decoding across line 1/2 boundary
   const recs = decodeRecordsStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: 2, feedback: fb, carryover: true, beam: 2 })

@@ -32,7 +32,7 @@ const initialWeights = {
 } as Record<string, number>
 
 type HoverState = {
-  type: 'field' | 'subEntity' | 'record' | null
+  type: 'field' | 'entity' | null
   value: string | null
   spanId?: string
 }
@@ -335,7 +335,7 @@ function App() {
     const { start, end } = textSelection
 
     const newEntry: FeedbackEntry = {
-      kind: 'subEntity',
+      kind: 'entity',
       fileStart: start,
       fileEnd: end,
       entityType: type as EntityType
@@ -530,7 +530,7 @@ function App() {
                       <ul>
                         {feedbackEntries.map((entry, idx) => (
                           <li key={idx}>
-                            {entry.kind === 'subEntity' && `${entry.entityType}: chars ${entry.fileStart}–${entry.fileEnd}`}
+                            {entry.kind === 'entity' && `${entry.entityType}: chars ${entry.fileStart}–${entry.fileEnd}`}
                             {entry.kind === 'field' && `${entry.field.fieldType}: line ${entry.field.lineIndex} [${entry.field.start}:${entry.field.end}]`}
                           </li>
                         ))}

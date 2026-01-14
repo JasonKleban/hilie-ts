@@ -210,7 +210,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
 
   // Sort containers deterministically for assignment and stable output.
   keptRecords.sort((a, b) => a.startLine - b.startLine)
-  keptSubEntities.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
+  keptEntities.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
 
   // Attach fields to the most specific explicit container containing their line.
   // Prefer an explicit sub-entity, otherwise an explicit record.

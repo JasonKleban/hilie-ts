@@ -65,7 +65,7 @@ function testBuildFeedback() {
   const fb = buildFeedbackFromHistories(entityHist, fieldHist, new Set([0]))
   const entries = fb.entries
   assert(entries.some(e => e.kind === 'record' && e.startLine === 0 && e.endLine === 0), 'buildFeedback should include a record entry for the boundary line')
-  assert(entries.some(e => e.kind === 'subEntity'), 'buildFeedback should include the subEntity entry')
+  assert(entries.some(e => e.kind === 'entity'), 'buildFeedback should include the entity entry')
   assert(entries.filter(e => e.kind === 'field').length === 2, 'buildFeedback should include field entries')
 }
 
@@ -116,8 +116,8 @@ function testFeedbackTwoEntities() {
   // Create file-level sub-entity assertions to avoid relying on startLine/endLine
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const fb: any = { entries: [
-    { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[0]! + lines[0]!.length, entityType: 'Primary' },
-    { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[5]! + lines[5]!.length, entityType: 'Guardian' }
+    { kind: 'entity', fileStart: lineStarts[0]!, fileEnd: lineStarts[0]! + lines[0]!.length, entityType: 'Primary' },
+    { kind: 'entity', fileStart: lineStarts[5]!, fileEnd: lineStarts[5]! + lines[5]!.length, entityType: 'Guardian' }
   ] }
 
   const res = updateWeightsFromUserFeedback(lines, spans, predBefore, fb, { ...weights }, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
@@ -134,25 +134,25 @@ function testFeedbackTwoEntities() {
     // Diagnostic logging
     // eslint-disable-next-line no-console
     console.log('DEBUG recs:', JSON.stringify(recs, null, 2))
-    assert(Boolean(recs.some(r => r.startLine === 0 && (r.subEntities ?? [])[0] && (r.subEntities ?? [])[0]!.entityType === 'Primary')), 'line 0 should be Primary')
-    assert(Boolean(recs.some(r => r.startLine === 5 && (r.subEntities ?? [])[0] && (r.subEntities ?? [])[0]!.entityType === 'Guardian')), 'line 5 should be Guardian')
+    assert(Boolean(recs.some(r => r.startLine === 0 && (r.entities ?? [])[0] && (r.entities ?? [])[0]!.entityType === 'Primary')), 'line 0 should be Primary')
+    assert(Boolean(recs.some(r => r.startLine === 5 && (r.entities ?? [])[0] && (r.entities ?? [])[0]!.entityType === 'Guardian')), 'line 5 should be Guardian')
   } catch (err) {
     throw err
   }
 
   const normalizedFb = normalizeFeedback(fb, lines)
-  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred, res.spansPerLine ?? spans), res.updated, segmentFeatures, householdInfoSchema, normalizedFb.subEntities)
+  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred, res.spansPerLine ?? spans), res.updated, segmentFeatures, householdInfoSchema, normalizedFb.entities)
   // Diagnostic
   // eslint-disable-next-line no-console
   console.log('DEBUG records:', JSON.stringify(records, null, 2))
   assert(records.length >= 2, 'there should be at least two top-level records')
-  assert(records[0]!.subEntities[0]!.entityType === 'Primary', 'first sub-entity should be Primary')
-  assert(records[1]!.subEntities[0]!.entityType === 'Guardian', 'second sub-entity should be Guardian')
-  // New assertion: when file-offset sub-entity feedback is provided, the rendered sub-entity should preserve asserted file offsets (no whole-line snap)
-  const fbPrimary = normalizedFb.subEntities.find(s => s.entityType === 'Primary')!
-  const fbGuardian = normalizedFb.subEntities.find(s => s.entityType === 'Guardian')!
-  assert(Boolean(fbPrimary && records[0]!.subEntities[0]!.fileStart === fbPrimary.fileStart && records[0]!.subEntities[0]!.fileEnd === fbPrimary.fileEnd), 'primary sub-entity should preserve fileStart/fileEnd')
-  assert(Boolean(fbGuardian && records[1]!.subEntities[0]!.fileStart === fbGuardian.fileStart && records[1]!.subEntities[0]!.fileEnd === fbGuardian.fileEnd), 'guardian sub-entity should preserve fileStart/fileEnd')
+  assert(records[0]!.entities[0]!.entityType === 'Primary', 'first entity should be Primary')
+  assert(records[1]!.entities[0]!.entityType === 'Guardian', 'second entity should be Guardian')
+  // New assertion: when file-offset entity feedback is provided, the rendered entity should preserve asserted file offsets (no whole-line snap)
+  const fbPrimary = normalizedFb.entities.find(s => s.entityType === 'Primary')!
+  const fbGuardian = normalizedFb.entities.find(s => s.entityType === 'Guardian')!
+  assert(Boolean(fbPrimary && records[0]!.entities[0]!.fileStart === fbPrimary.fileStart && records[0]!.entities[0]!.fileEnd === fbPrimary.fileEnd), 'primary entity should preserve fileStart/fileEnd')
+  assert(Boolean(fbGuardian && records[1]!.entities[0]!.fileStart === fbGuardian.fileStart && records[1]!.entities[0]!.fileEnd === fbGuardian.fileEnd), 'guardian entity should preserve fileStart/fileEnd')
 
 
 }
@@ -171,7 +171,7 @@ function testDecodeWithFeedbackSanitizesCandidates() {
 
   // Assert a sub-entity by file offsets that starts at 10 and ends at 32.
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
-  const fb: Feedback = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 32, entityType: 'Guardian' } ] }
+  const fb: Feedback = { entries: [ { kind: 'entity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 32, entityType: 'Guardian' } ] }
 
   const res = decodeJointSequenceWithFeedback(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb as any)
   const sanitizedSpans = res.spansPerLine[0]!.spans
@@ -189,7 +189,7 @@ function testDecodeWithFeedbackSanitizesCandidates() {
   // non-overlapping spans outside the assertion are kept.
   const spans2 = [{ lineIndex: 0, spans: [ { start: 0, end: 5 }, { start: 8, end: 12 }, { start: 12, end: 22 }, { start: 21, end: 25 } ] }] as LineSpans[]
   // Assert sub-entity 10..20 on the line
-  const fb2: Feedback = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 20, entityType: 'Guardian' } ] }
+  const fb2: Feedback = { entries: [ { kind: 'entity', fileStart: lineStarts[0]! + 10, fileEnd: lineStarts[0]! + 20, entityType: 'Guardian' } ] }
   const res2 = decodeJointSequenceWithFeedback(lines, spans2, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, fb2)
   const s2 = res2.spansPerLine[0]!.spans
   // span 0..5 does not intersect 10..20 -> should be kept
@@ -213,7 +213,7 @@ function testSubEntityRemovesContainerSpans() {
   const spans = [{ lineIndex: 0, spans: [ { start: 0, end: 22 }, { start: 14, end: 23 } ] }] as LineSpans[]
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   // Assert sub-entity covering the parentheses area (14..23)
-  const fb: Feedback = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]! + 14, fileEnd: lineStarts[0]! + 23, entityType: 'Guardian' } ] }
+  const fb: Feedback = { entries: [ { kind: 'entity', fileStart: lineStarts[0]! + 14, fileEnd: lineStarts[0]! + 23, entityType: 'Guardian' } ] }
 
   const res = decodeJointSequenceWithFeedback(lines, spans, {}, householdInfoSchema, boundaryFeatures, segmentFeatures, fb)
   const s = res.spansPerLine[0]!.spans
@@ -312,7 +312,7 @@ function testAssertedFieldRemovesOverlaps() {
 
   // Feedback: assert sub-entity covering a broad slice and assert an exact Name field
   const fb = { entries: [
-    { kind: 'subEntity', fileStart: 3, fileEnd: 32, entityType: 'Guardian' },
+    { kind: 'entity', fileStart: 3, fileEnd: 32, entityType: 'Guardian' },
     { kind: 'field', field: { action: 'add', lineIndex: 0, start: 3, end: 18, fieldType: 'Name', confidence: 1 } }
   ] }
 
@@ -444,7 +444,7 @@ function testAssertedRangesNotSubdivided() {
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
   const entries: FeedbackEntry[] = [
     { kind: 'record', startLine: 0, endLine: 2 },
-    { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Primary' as any },
+    { kind: 'entity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Primary' as any },
     { kind: 'field', field: { action: 'add', lineIndex: 0, start: nameSpan.start, end: nameSpan.end, fieldType: 'Name', confidence: 1.0 } }
   ]
 
@@ -476,15 +476,15 @@ function testAssertedRangesNotSubdivided() {
   }
 
   // Field must not be subdivided: the asserted span retains the label.
-  const hasField = recs.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.lineIndex === 0 && f.start === nameSpan.start && f.end === nameSpan.end && f.fieldType === 'Name')))
+  const hasField = recs.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.lineIndex === 0 && f.start === nameSpan.start && f.end === nameSpan.end && f.fieldType === 'Name')))
   assert(hasField, 'asserted field span should remain labeled as Name')
 
   const finalRecs = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred, res.spansPerLine ?? spans), res.updated, segmentFeatures, householdInfoSchema)
   assert(finalRecs.length >= 2, `expected at least two records after boundary enforcement, got ${finalRecs.length}`)
   const firstRecFromFinal = finalRecs[0]!
   assert(firstRecFromFinal.startLine === 0 && firstRecFromFinal.endLine === 2, `expected first record to be exactly lines 0-2, got ${firstRecFromFinal.startLine}-${firstRecFromFinal.endLine}`)
-  assert(firstRecFromFinal.subEntities.length === 1, `expected exactly one sub-entity in asserted range, got ${firstRecFromFinal.subEntities.length}`)
-  const se = firstRecFromFinal.subEntities[0]!
+  assert(firstRecFromFinal.entities.length === 1, `expected exactly one entity in asserted range, got ${firstRecFromFinal.entities.length}`)
+  const se = firstRecFromFinal.entities[0]!
   assert(se.startLine === 0 && se.endLine === 2 && se.entityType === 'Primary', 'asserted sub-entity range should be a single Primary span')
 
   const matched = se.fields.filter(f => f.lineIndex === 0 && f.start === nameSpan.start && f.end === nameSpan.end && f.fieldType === 'Name')
@@ -524,7 +524,7 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
     entries: [
       { kind: 'record', startLine: 0, endLine: 8 },
       { kind: 'record', startLine: 20, endLine: 25 },
-      { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
+      { kind: 'entity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
     ]
   }
 
@@ -542,18 +542,18 @@ function testCase1RecordWithGuardianSubEntityDoesNotSplit() {
   // The Guardian sub-entity assertion should apply across its full range.
   const rec0 = recs.find(r => r.startLine === 0)
   for (let li = 5; li <= 8; li++) {
-    assert(Boolean(rec0 && rec0.subEntities && rec0.subEntities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to sub-entity assertion`)
+    assert(Boolean(rec0 && rec0.entities && rec0.entities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to entity assertion`)
   }
 
-  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred, res.spansPerLine ?? spans), res.updated, segmentFeatures, householdInfoSchema)
+  const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred, res.spansPerLine ?? spans), res.updated, segmentFeatures, householdInfoSchema, normalizeFeedback(feedback, lines).entities)
   const recFromEntities = records.find(r => r.startLine === 0)
   assert(Boolean(recFromEntities), 'expected a record starting at line 0')
   assert(recFromEntities!.endLine === 8, `expected first record to end at line 8, got ${recFromEntities!.endLine}`)
-  assert(!records.some(r => r.startLine === 5), 'sub-entity start line must not create a new record boundary')
+  assert(!records.some(r => r.startLine === 5), 'entity start line must not create a new record boundary')
 
-  const guardian = (recFromEntities!.subEntities ?? []).find(se => se.entityType === 'Guardian')
-  assert(Boolean(guardian), 'expected a Guardian sub-entity span inside the first record')
-  assert(guardian!.startLine === 5 && guardian!.endLine === 8, `expected Guardian sub-entity to be lines 5-8, got ${guardian!.startLine}-${guardian!.endLine}`)
+  const guardian = (recFromEntities!.entities ?? []).find(se => se.entityType === 'Guardian')
+  assert(Boolean(guardian), 'expected a Guardian entity span inside the first record')
+  assert(guardian!.startLine === 5 && guardian!.endLine === 8, `expected Guardian entity to be lines 5-8, got ${guardian!.startLine}-${guardian!.endLine}`)
 
 
 }
@@ -591,8 +591,8 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
   const feedback = {
     entries: [
       { kind: 'record', startLine: 10, endLine: 18 },
-      { kind: 'subEntity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' },
-      { kind: 'subEntity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
+      { kind: 'entity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' },
+      { kind: 'entity', fileStart: lineStarts[5]!, fileEnd: lineStarts[8]! + lines[8]!.length, entityType: 'Guardian' }
     ]
   } as any
 
@@ -622,11 +622,11 @@ function testCase1SubEntityOutsideRecordAssertionIsApplied() {
 
 
   for (let li = 5; li <= 8; li++) {
-    assert(Boolean(rec5 && rec5.subEntities && rec5.subEntities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to sub-entity assertion outside explicit record`) 
+    assert(Boolean(rec5 && rec5.entities && rec5.entities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to entity assertion outside explicit record`) 
   }
   const rec10 = recs.find(r => r.startLine === 10)
   for (let li = 15; li <= 18; li++) {
-    assert(Boolean(rec10 && rec10.subEntities && rec10.subEntities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to sub-entity assertion inside asserted record`) 
+    assert(Boolean(rec10 && rec10.entities && rec10.entities.some(se => se.entityType === 'Guardian')), `line ${li} should be Guardian due to entity assertion inside asserted record`) 
   }
 
 
@@ -669,7 +669,7 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
           confidence: 1
         }
       },
-      { kind: 'subEntity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' }
+      { kind: 'entity', fileStart: lineStarts[15]!, fileEnd: lineStarts[18]! + lines[18]!.length, entityType: 'Guardian' }
     ]
   } as any
 
@@ -710,10 +710,10 @@ function testCase1EmailAssertionDoesNotCreateOverlappingSpans() {
   const records = entitiesFromJointSequence(lines, res.spansPerLine ?? spans, ifArrayToJoint(res.pred as any, spans), res.updated, segmentFeatures, householdInfoSchema)
   // Diagnostic
   // eslint-disable-next-line no-console
-  console.log('DEBUG records at line 17 context:', JSON.stringify(records.map(r => ({ startLine: r.startLine, endLine: r.endLine, subEntities: (r.subEntities ?? []).map(se=>({ startLine: se.startLine, endLine: se.endLine, entityType: se.entityType, fieldsCount: (se.fields ?? []).length })) })), null, 2))
-  const recWithGuardian = records.find(r => (r.subEntities ?? []).some(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17))
-  assert(Boolean(recWithGuardian), 'expected to find a record containing Guardian sub-entity covering line 17')
-  const guardian = (recWithGuardian!.subEntities ?? []).find(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17)!
+  console.log('DEBUG records at line 17 context:', JSON.stringify(records.map(r => ({ startLine: r.startLine, endLine: r.endLine, entities: (r.entities ?? []).map(se=>({ startLine: se.startLine, endLine: se.endLine, entityType: se.entityType, fieldsCount: (se.fields ?? []).length })) })), null, 2))
+  const recWithGuardian = records.find(r => (r.entities ?? []).some(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17))
+  assert(Boolean(recWithGuardian), 'expected to find a record containing Guardian entity covering line 17')
+  const guardian = (recWithGuardian!.entities ?? []).find(se => se.entityType === 'Guardian' && se.startLine <= 17 && se.endLine >= 17)!
   // Diagnostic
   // eslint-disable-next-line no-console
   console.log('DEBUG guardian fields:', JSON.stringify(guardian.fields, null, 2))
@@ -777,7 +777,7 @@ function testCase1FieldOnlyEmailAssertionIsRendered() {
   const records = res.pred as RecordSpan[]
 
   // Field-only feedback should still result in a renderable field span in some sub-entity and record.
-  const matches = records.flatMap(r => r.subEntities.flatMap(se => se.fields))
+  const matches = records.flatMap(r => r.entities.flatMap(se => se.fields))
     .filter(f => f.lineIndex === 17 && f.start === 4 && f.end === 27 && f.fieldType === 'Email')
 
   if (matches.length !== 1) {
@@ -785,7 +785,7 @@ function testCase1FieldOnlyEmailAssertionIsRendered() {
     // eslint-disable-next-line no-console
     console.error('DEBUG spans for line 17:', JSON.stringify(res.spansPerLine?.[17]?.spans ?? []))
     // eslint-disable-next-line no-console
-    console.error('DEBUG records flattened fields around line 17:', JSON.stringify(records.flatMap(r => r.subEntities.flatMap(se => se.fields).filter((f:any) => f.lineIndex === 17))))
+    console.error('DEBUG records flattened fields around line 17:', JSON.stringify(records.flatMap(r => r.entities.flatMap(se => se.fields).filter((f:any) => f.lineIndex === 17))))
   }
 
   assert(matches.length === 1, `expected field-only asserted Email span to be rendered once; got ${matches.length}`)

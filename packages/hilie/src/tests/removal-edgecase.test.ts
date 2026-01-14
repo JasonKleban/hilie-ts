@@ -37,7 +37,7 @@ test('removal-edgecase deterministic negative update', () => {
   // And prediction should not include Phone (removed)
   const pred = res.pred
   if (Array.isArray(pred) && pred.length > 0 && ('startLine' in (pred as any)[0])) {
-    const foundPhone = (pred as any[]).some(r => (r.subEntities ?? []).some((se: any) => (se.fields ?? []).some((f: any) => f.fieldType === 'Phone')))
+    const foundPhone = (pred as any[]).some(r => (r.entities ?? []).some((se: any) => (se.fields ?? []).some((f: any) => f.fieldType === 'Phone')))
     ok(!foundPhone, 'after removal prediction should not include Phone')
   } else {
     ok(!((res.pred as any)[0]?.fields?.includes('Phone')), 'after removal prediction should not include Phone')

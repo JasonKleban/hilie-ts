@@ -112,7 +112,7 @@ export function buildFeedbackContext(
     }
   }
 
-  const entityTypeMap: Record<number, SubEntityType> = {};
+  const entityTypeMap: Record<number, EntityType> = {}; 
 
   // Helper: map file offsets to lines
   const lineStarts: number[] = [];
@@ -185,7 +185,7 @@ export function buildFeedbackContext(
       }
       
       for (let li = startLine; li <= boundedEnd; li++) {
-        entityTypeMap[li] = ent.entityType as SubEntityType
+        entityTypeMap[li] = ent.entityType as EntityType
       }
 
       // If this sub-entity is not inside an explicit record assertion, create
@@ -203,7 +203,7 @@ export function buildFeedbackContext(
       const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine;
       const boundedEnd = Math.min(endLine, spansCopy.length - 1);
       for (let li = startLine; li <= boundedEnd; li++) {
-        entityTypeMap[li] = ent.entityType as SubEntityType;
+        entityTypeMap[li] = ent.entityType as EntityType;
       }
 
       const containedInRecord = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= startLine && r.endLine !== undefined && r.endLine >= endLine)

@@ -73,7 +73,7 @@ test('randomized cross-window sub-entity assertions produce coverage and non-ove
     }
 
     const fb: any = {
-      entries: [ { kind: 'subEntity', fileStart: lineStarts[startLine]!, fileEnd: lineStarts[endLine]! + lines[endLine]!.length, entityType: 'Guardian' } ]
+      entries: [ { kind: 'entity', fileStart: lineStarts[startLine]!, fileEnd: lineStarts[endLine]! + lines[endLine]!.length, entityType: 'Guardian' } ]
     }
 
     // Randomize other decoding options

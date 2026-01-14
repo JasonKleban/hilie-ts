@@ -36,7 +36,7 @@ for (const r of records) {
   const overlaps = (s:number,e:number) => !(e <= 84 || s >= 85)
   if (overlaps(r.fileStart, r.fileEnd)) {
     console.log('Record overlapping 84-85', { fileStart: r.fileStart, fileEnd: r.fileEnd })
-    for (const s of (r.subEntities ?? [])) {
+    for (const s of (r.entities ?? [])) {
       if (overlaps(s.fileStart, s.fileEnd)) console.log('  SubEntity', s.entityType, s.fileStart, s.fileEnd)
       for (const f of (s.fields ?? [])) {
         if (overlaps(f.fileStart, f.fileEnd)) console.log('    Field', f.fieldType, f.fileStart, f.fileEnd)

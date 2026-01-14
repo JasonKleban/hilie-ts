@@ -56,6 +56,6 @@ test('field-only feedback creates a record containing the asserted field', () =>
   expect(records.length).toBeGreaterThan(0)
   const rec = records.find(r => r.startLine <= 0 && r.endLine >= 0)
   expect(rec).toBeDefined()
-  const hasField = (rec!.subEntities ?? []).some(se => (se.fields ?? []).some(f => f.lineIndex === 0 && f.start === 0 && f.end === 8 && f.fieldType === 'Name'))
+  const hasField = (rec!.entities ?? []).some(se => (se.fields ?? []).some(f => f.lineIndex === 0 && f.start === 0 && f.end === 8 && f.fieldType === 'Name'))
   expect(hasField).toBe(true)
 })

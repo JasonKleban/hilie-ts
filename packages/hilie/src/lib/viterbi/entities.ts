@@ -274,7 +274,7 @@ export function entitiesFromJointSequence(
         }
       }
 
-      const last = subEntities[subEntities.length - 1];
+      const last = entities[entities.length - 1];
 
       // Compute tight line bounds from any *non-NOISE* fields on this line. We
       // ignore NOISE-only spans for tight bounds so that user-selected mid-line
@@ -300,7 +300,7 @@ export function entitiesFromJointSequence(
       }
     }
 
-    // Prefer precise feedback file offsets for aggregated sub-entities when available.
+    // Prefer precise feedback file offsets for aggregated entities when available.
     function spansOverlap(aStart?: number, aEnd?: number, bStart?: number, bEnd?: number) {
       if (aStart === undefined || aEnd === undefined || bStart === undefined || bEnd === undefined) return false
       return !(aEnd <= bStart || aStart >= bEnd)
@@ -348,12 +348,12 @@ export function entitiesFromJointSequence(
 
     // Ensure fields are strictly inside their parent sub-entity bounds, and compute
     // entity-relative offsets based on the sub-entity's file start (not record).
-    for (const se of subEntities) {
-      // Clamp sub-entities to record bounds as a safety measure
+    for (const se of entities) {
+      // Clamp entities to record bounds as a safety measure
       if (se.fileStart < recFileStart) se.fileStart = recFileStart
       if (se.fileEnd > recFileEnd) se.fileEnd = recFileEnd
 
-      // Filter out fields that fall outside the precise bounds of the sub-entity
+      // Filter out fields that fall outside the precise bounds of the entity
       se.fields = (se.fields ?? []).filter(f => (f.fileStart ?? 0) >= (se.fileStart ?? 0) && (f.fileEnd ?? 0) <= (se.fileEnd ?? 0))
 
       for (const f of se.fields) {
@@ -365,7 +365,7 @@ export function entitiesFromJointSequence(
     const fileStart = offsets[startLine] ?? 0;
     const fileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
 
-    records.push({ startLine, endLine, fileStart, fileEnd, subEntities });
+    records.push({ startLine, endLine, fileStart, fileEnd, entities });
   }
 
   return records;
@@ -508,12 +508,12 @@ export function assembleRecordsFromCandidates(
     const startLine = windowStartLine + i;
     const endLine = windowStartLine + j - 1;
 
-    const subEntities: SubEntitySpan[] = [];
+    const entities: EntitySpan[] = [];
 
     for (let li = i; li <= j - 1; li++) {
       const globalLi = windowStartLine + li;
       const role = (jointAnnotatedWindow[li] && jointAnnotatedWindow[li]!.entityType)
-        ? (jointAnnotatedWindow[li]!.entityType as SubEntityType)
+        ? (jointAnnotatedWindow[li]!.entityType as EntityType)
         : 'Unknown';
       const spans = spansPerLine[globalLi]?.spans ?? [];
 
@@ -584,7 +584,7 @@ export function assembleRecordsFromCandidates(
         }
       }
 
-      const last = subEntities[subEntities.length - 1];
+      const last = entities[entities.length - 1];
 
       const nonNoiseFields = lineFields.filter(f => f.fieldType !== schema.noiseLabel)
       const lineHasFields = nonNoiseFields.length > 0
@@ -600,7 +600,7 @@ export function assembleRecordsFromCandidates(
       } else {
         const fileStart = lineHasFields ? lineMinStart : (offsets[globalLi] ?? 0);
         const fileEnd = lineHasFields ? lineMaxEnd : ((offsets[globalLi] ?? 0) + (lines[globalLi]?.length ?? 0));
-        subEntities.push({ startLine: globalLi, endLine: globalLi, fileStart, fileEnd, entityType: role, fields: lineFields });
+        entities.push({ startLine: globalLi, endLine: globalLi, fileStart, fileEnd, entityType: role, fields: lineFields });
       }
     }
 
@@ -614,14 +614,14 @@ export function assembleRecordsFromCandidates(
     const recFileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
 
     if (feedbackEntities && feedbackEntities.length > 0) {
-      for (const fb of feedbackities) {
+      for (const fb of feedbackEntities) {
         if (fb.fileStart === undefined || fb.fileEnd === undefined || fb.entityType === undefined) continue
-        for (const se of subEntities) {
+        for (const se of entities) {
           if (!spansOverlap(se.fileStart, se.fileEnd, fb.fileStart, fb.fileEnd)) continue
 
           se.fileStart = fb.fileStart
           se.fileEnd = fb.fileEnd
-          se.entityType = fb.entityType as SubEntityType
+          se.entityType = fb.entityType as EntityType
 
           const offsetToLine = (off: number) => {
             if (offsets.length === 0) return 0
@@ -645,7 +645,7 @@ export function assembleRecordsFromCandidates(
       }
     }
 
-    for (const se of subEntities) {
+    for (const se of entities) {
       if (se.fileStart < recFileStart) se.fileStart = recFileStart
       if (se.fileEnd > recFileEnd) se.fileEnd = recFileEnd
 
@@ -660,7 +660,7 @@ export function assembleRecordsFromCandidates(
     const fileStart = offsets[startLine] ?? 0;
     const fileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
 
-    records.push({ startLine, endLine, fileStart, fileEnd, subEntities });
+    records.push({ startLine, endLine, fileStart, fileEnd, entities });
   }
 
   return records;

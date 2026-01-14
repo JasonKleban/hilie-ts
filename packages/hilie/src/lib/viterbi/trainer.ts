@@ -9,7 +9,7 @@ import type {
   JointSequence,
   JointState,
   LineSpans,
-  SubEntityType,
+  EntityType,
   RecordSpan
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
@@ -47,7 +47,7 @@ export function updateWeightsFromUserFeedback(
         jointSeqLocal[li] = jointSeqLocal[li] ?? { boundary: 'C', fields: [] }
       }
 
-      for (const se of r.subEntities ?? []) {
+      for (const se of r.entities ?? []) {
         for (const f of se.fields ?? []) {
           const li = f.lineIndex ?? 0
           const spans = spansPerLine[li]?.spans ?? []
@@ -67,7 +67,6 @@ export function updateWeightsFromUserFeedback(
   }
 
   const normalizedFeedback = normalizeFeedback(feedback, lines);
-  const feedbackEntities = normalizedFeedback.entities;
   const feedbackEntities = normalizedFeedback.entities;
   const recordAssertions = normalizedFeedback.records;
   const entityAssertions = normalizedFeedback.entities;
@@ -292,9 +291,9 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
-  // Ensure sub-entity-only assertions get implicit record boundaries so
+  // Ensure entity-only assertions get implicit record boundaries so
   // they will be rendered even when no explicit record was asserted.
-  for (const se of subEntityAssertions ?? []) {
+  for (const se of entityAssertions ?? []) {
     if (se.startLine === undefined && (se.fileStart === undefined || se.fileEnd === undefined)) continue;
     const sLine = se.startLine ?? offsetToLine(se.fileStart ?? 0)
     const eLine = se.endLine ?? offsetToLine(Math.max(0, (se.fileEnd ?? 0) - 1))
@@ -751,12 +750,12 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
-  // If only sub-entity assertions were provided (no explicit record assertions),
-  // prefer a collapsed record segmentation where only the asserted sub-entity
-  // start lines are boundaries. This mirrors legacy behavior where sub-entity
+  // If only entity assertions were provided (no explicit record assertions),
+  // prefer a collapsed record segmentation where only the asserted entity
+  // start lines are boundaries. This mirrors legacy behavior where entity
   // feedback alone creates visible records at the asserted starts rather than
   // preserving many other spurious boundaries.
-  if ((recordAssertions == null || recordAssertions.length === 0) && (subEntityAssertions && subEntityAssertions.length > 0)) {
+  if ((recordAssertions == null || recordAssertions.length === 0) && (entityAssertions && entityAssertions.length > 0)) {
     const forcedStarts = Object.keys(forcedBoundariesByLine).filter(k => forcedBoundariesByLine[Number(k)] === 'B').map(k => Number(k)).sort((a, b) => a - b)
     if (forcedStarts.length > 0) {
       const minStart = forcedStarts[0]!
@@ -824,7 +823,7 @@ export function updateWeightsFromUserFeedback(
 
 
     const entityType = (() => {
-      const list = (subEntityAssertions ?? []) as any[];
+      const list = (entityAssertions ?? []) as any[];
       for (let i = list.length - 1; i >= 0; i--) {
         const e = list[i];
         if (!e || e.entityType === undefined || e.startLine === undefined) continue;
@@ -838,7 +837,7 @@ export function updateWeightsFromUserFeedback(
     return { ...state, fields, entityType } as any;
   });
 
-  const records = entitiesFromJointSequence(lines, spansCopy, predAfterUpdate as any, weights, segmentFeaturesArg, schema, subEntityAssertions)
+  const records = entitiesFromJointSequence(lines, spansCopy, predAfterUpdate as any, weights, segmentFeaturesArg, schema, entityAssertions)
 
   // Post-process to enforce asserted field labels and remove overlapping candidates
   const normFields = (normalizedFeedback?.entities ?? []).flatMap((e: any) => e.fields ?? [])
@@ -854,13 +853,13 @@ export function updateWeightsFromUserFeedback(
     const rec = records.find(r => r.startLine <= li && r.endLine >= li)
     if (!rec) continue
 
-    // Prefer a sub-entity container that overlaps the asserted range, otherwise use the first sub-entity on that line
-    let se = (rec.subEntities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
+    // Prefer an entity container that overlaps the asserted range, otherwise use the first entity on that line
+    let se = (rec.entities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
     if (!se) {
-      // create a minimal sub-entity spanning the single line
+      // create a minimal entity spanning the single line
       se = { startLine: li, endLine: li, fileStart: 0, fileEnd: 0, entityType: af.entityType ?? 'Unknown', fields: [] as any }
-      rec.subEntities = rec.subEntities ?? []
-      rec.subEntities.push(se)
+      rec.entities = rec.entities ?? []
+      rec.entities.push(se)
     }
 
     // Remove any overlapping fields within this sub-entity
@@ -898,11 +897,11 @@ export function updateWeightsFromUserFeedback(
     const rec = records.find(r => r.startLine <= li && r.endLine >= li)
     if (!rec) continue
 
-    let se = (rec.subEntities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
+    let se = (rec.entities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
     if (!se) {
       se = { startLine: li, endLine: li, fileStart: 0, fileEnd: 0, entityType: af.entityType ?? 'Unknown', fields: [] as any }
-      rec.subEntities = rec.subEntities ?? []
-      rec.subEntities.push(se)
+      rec.entities = rec.entities ?? []
+      rec.entities.push(se)
     }
 
     // Debug: trace when handling the specific asserted email span

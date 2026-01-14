@@ -52,7 +52,7 @@ Two streaming primitives are exposed:
   - `decodeJointSequenceWithFeedback` to re-decode while keeping assertions stable
   - `updateWeightsFromUserFeedback` to update weights based on corrections
 
-- **RecordSpan / SubEntitySpan** — structured output. A `RecordSpan` is a top-level record; inside it, `subEntities` represent roles (e.g. `Primary`, `Guardian`) and hold `FieldSpan[]` with file-relative offsets and confidences.
+- **RecordSpan / EntitySpan** — structured output. A `RecordSpan` is a top-level record; inside it, `entities` represent roles (e.g. `Primary`, `Guardian`) and hold `FieldSpan[]` with file-relative offsets and confidences.
 
 - **Field labels** — canonical labels you will encounter: `ExtID`, `Name`, `PreferredName`, `Phone`, `Email`, `Birthdate`, and `NOISE` (for non-field tokens).
 
@@ -175,7 +175,7 @@ const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l 
 // Assert that the first line is a Primary sub-entity via file offsets:
 const feedback = {
   entries: [
-    { kind: 'subEntity', fileStart: lineStarts[0], fileEnd: lineStarts[0] + lines[0].length, entityType: 'Primary' },
+    { kind: 'entity', fileStart: lineStarts[0], fileEnd: lineStarts[0] + lines[0].length, entityType: 'Primary' },
   ]
 }
 

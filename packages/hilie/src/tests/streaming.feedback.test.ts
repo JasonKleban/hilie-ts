@@ -1,7 +1,7 @@
 import { decodeRecordsStreaming } from '../lib/viterbi/streaming.js'
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
 import { householdInfoSchema } from './test-helpers.js'
-import type { Feedback, LineSpans, RecordSpan, SubEntitySpan, FieldSpan } from '../lib/types.js'
+import type { Feedback, LineSpans, RecordSpan, EntitySpan, FieldSpan } from '../lib/types.js' 
 
 declare const test: (name: string, fn: () => void) => void;
 
@@ -20,6 +20,6 @@ test('streaming decode honors forced field assertions', () => {
 
   // find the asserted field in the returned record structure
   const recsPred = first.pred as RecordSpan[]
-  const labPresent = recsPred.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.lineIndex === 0 && f.start === 0 && f.end === 3 && f.fieldType === 'Name')))
+  const labPresent = recsPred.some(r => (r.entities ?? []).some((se: EntitySpan) => (se.fields ?? []).some((f: FieldSpan) => f.lineIndex === 0 && f.start === 0 && f.end === 3 && f.fieldType === 'Name')))
   if (!labPresent) throw new Error(`expected forced label 'Name' present in returned records`)
 })
