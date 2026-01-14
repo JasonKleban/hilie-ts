@@ -68,9 +68,9 @@ export function updateWeightsFromUserFeedback(
 
   const normalizedFeedback = normalizeFeedback(feedback, lines);
   const feedbackEntities = normalizedFeedback.entities;
-  const feedbackSubEntities = normalizedFeedback.subEntities;
+  const feedbackEntities = normalizedFeedback.entities;
   const recordAssertions = normalizedFeedback.records;
-  const subEntityAssertions = normalizedFeedback.subEntities;
+  const entityAssertions = normalizedFeedback.entities;
 
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({
     lineIndex: s.lineIndex,
@@ -199,9 +199,9 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
-  const entityTypeMap: Record<number, SubEntityType> = {};
+  const entityTypeMap: Record<number, EntityType> = {};
 
-  // If sub-entity assertions include file offsets, map them to overlapping lines
+  // If entity assertions include file offsets, map them to overlapping lines
   const lineStarts: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (i === 0) lineStarts.push(0)
@@ -228,19 +228,19 @@ export function updateWeightsFromUserFeedback(
     return lo
   }
 
-  for (const ent of feedbackSubEntities ?? []) {
+  for (const ent of feedbackEntities ?? []) {
     if (ent.entityType === undefined) continue;
 
     if (ent.fileStart !== undefined && ent.fileEnd !== undefined) {
       const startLine = offsetToLine(ent.fileStart)
       const endLine = offsetToLine(Math.max(0, ent.fileEnd - 1))
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
-      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as SubEntityType
+      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as EntityType
     } else if (ent.startLine !== undefined) {
       const startLine = ent.startLine
       const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
-      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as SubEntityType
+      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as EntityType
     }
   }
 
@@ -263,6 +263,30 @@ export function updateWeightsFromUserFeedback(
     if (r.startLine === undefined || r.endLine === undefined) continue;
     if (r.endLine < r.startLine) continue;
     const nextLine = r.endLine + 1;
+    if (nextLine >= 0 && nextLine < spansCopy.length) {
+      forcedBoundariesByLine[nextLine] = 'B';
+    }
+  }
+
+  // Treat any feedback 'entities' that were created implicitly due to field-only
+  // assertions as record boundaries as well. This ensures a field assertion on
+  // a line will produce a visible record even when no explicit record assertion
+  // was provided.
+  for (const ent of feedbackEntities ?? []) {
+    // Only consider implicit per-line record containers (startLine present)
+    // that carry at least one asserted field and are not already covered by
+    // an explicit record assertion.
+    if (ent.startLine === undefined) continue;
+    if (!ent.fields || ent.fields.length === 0) continue;
+
+    const contained = (recordAssertions ?? []).some(r => r.startLine !== undefined && r.startLine <= (ent.startLine ?? -1) && r.endLine !== undefined && r.endLine >= (ent.endLine ?? ent.startLine ?? -1))
+    if (contained) continue;
+
+    const sLine = ent.startLine
+    const eLine = (ent.endLine !== undefined && ent.endLine >= sLine) ? ent.endLine : (spansCopy.length - 1)
+    forcedBoundariesByLine[sLine] = 'B'
+    for (let li = sLine + 1; li <= eLine; li++) forcedBoundariesByLine[li] = 'C'
+    const nextLine = eLine + 1;
     if (nextLine >= 0 && nextLine < spansCopy.length) {
       forcedBoundariesByLine[nextLine] = 'B';
     }

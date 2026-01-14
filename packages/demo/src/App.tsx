@@ -48,7 +48,6 @@ function App() {
   const [records, setRecords] = useState<RecordSpan[]>([])
   const [hoverState, setHoverState] = useState<HoverState>({ type: null, value: null })
   const [textSelection, setTextSelection] = useState<{ start: number; end: number } | null>(null)
-  const [expandedSelection, setExpandedSelection] = useState<{ start: number; end: number } | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [activeLabelMode, setActiveLabelMode] = useState<'Primary' | 'Guardian' | null>(null)
 
@@ -160,7 +159,7 @@ function App() {
             weights,
             segmentFeatures,
             householdInfoSchema,
-            normalizedFb.subEntities
+            normalizedFb.entities
           )
 
           console.log('Extracted records:', JSON.stringify(extractedRecords, null, 2))
@@ -311,7 +310,7 @@ function App() {
               newWeights,
               segmentFeatures,
               householdInfoSchema,
-              normalizedFb.subEntities
+              normalizedFb.entities
             )
             setRecords(extractedRecords)
           }
@@ -319,51 +318,11 @@ function App() {
       } finally {
         setIsLoading(false)
         setTextSelection(null)
-        setExpandedSelection(null)
         window.getSelection()?.removeAllRanges()
       }
     }, 0)
   }
 
-  // Handle Record button click
-  const handleRecordFeedback = () => {
-    if (!textSelection || !lines.length) return
-
-    const { start, end } = expandedSelection || textSelection
-    
-    // Find line indices
-    let currentOffset = 0
-    let startLine = 0
-    let endLine = 0
-    
-    for (let i = 0; i < lines.length; i++) {
-      const lineLength = lines[i]!.length + 1 // +1 for newline
-      if (start < currentOffset + lineLength) {
-        startLine = i
-        break
-      }
-      currentOffset += lineLength
-    }
-    
-    currentOffset = 0
-    for (let i = 0; i < lines.length; i++) {
-      const lineLength = lines[i]!.length + 1
-      if (end <= currentOffset + lineLength) {
-        endLine = i
-        break
-      }
-      currentOffset += lineLength
-    }
-
-    const newEntry: FeedbackEntry = {
-      kind: 'record',
-      startLine,
-      endLine
-    }
-
-    applyFeedback([...feedbackEntries, newEntry])
-    setActiveLabelMode(null)
-  }
 
   // Handle SubEntity button click
   const handleSubEntityFeedback = (type: 'Primary' | 'Guardian') => {
@@ -425,35 +384,6 @@ function App() {
     applyFeedback([...feedbackEntries, newEntry])
   }
 
-  // Handle Record button hover to expand selection
-  const handleRecordHoverEnter = () => {
-    if (!textSelection || !lines.length) return
-
-    const { start, end } = textSelection
-    
-    // Expand to full lines
-    let currentOffset = 0
-    let expandedStart = 0
-    let expandedEnd = 0
-    
-    for (let i = 0; i < lines.length; i++) {
-      const lineLength = lines[i]!.length
-      if (start >= currentOffset && start < currentOffset + lineLength + 1) {
-        expandedStart = currentOffset
-      }
-      if (end >= currentOffset && end <= currentOffset + lineLength + 1) {
-        expandedEnd = currentOffset + lineLength
-        break
-      }
-      currentOffset += lineLength + 1
-    }
-
-    setExpandedSelection({ start: expandedStart, end: expandedEnd })
-  }
-
-  const handleRecordHoverLeave = () => {
-    setExpandedSelection(null)
-  }
 
   // Load sample data
   const loadSampleData = async (caseNum: 1 | 3 | 4) => {
@@ -513,10 +443,9 @@ function App() {
       records,
       feedbackEntries,
       hoverState,
-      setHoverState,
-      expandedSelection
+      setHoverState
     })
-  }, [normalizedText, records, feedbackEntries, hoverState, expandedSelection])
+  }, [normalizedText, records, feedbackEntries, hoverState])
 
   return (
     <div className="app">
@@ -548,16 +477,6 @@ function App() {
                   <h3>Label Selection As:</h3>
                   
                   <div className="label-buttons">
-                    <button
-                      className={`legend-button record-button ${activeLabelMode ? 'dimmed' : ''}`}
-                      onClick={handleRecordFeedback}
-                      onMouseEnter={handleRecordHoverEnter}
-                      onMouseLeave={handleRecordHoverLeave}
-                      disabled={!textSelection}
-                      title="Label selected lines as a Record"
-                    >
-                      Record
-                    </button>
 
                     <button
                       className={`legend-button subentity-button subentity-primary ${activeLabelMode === 'Primary' ? 'active' : activeLabelMode ? 'dimmed' : ''}`}
@@ -611,7 +530,6 @@ function App() {
                       <ul>
                         {feedbackEntries.map((entry, idx) => (
                           <li key={idx}>
-                            {entry.kind === 'record' && `Record: lines ${entry.startLine}–${entry.endLine}`}
                             {entry.kind === 'subEntity' && `${entry.entityType}: chars ${entry.fileStart}–${entry.fileEnd}`}
                             {entry.kind === 'field' && `${entry.field.fieldType}: line ${entry.field.lineIndex} [${entry.field.start}:${entry.field.end}]`}
                           </li>

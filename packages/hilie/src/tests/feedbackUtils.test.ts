@@ -4,7 +4,7 @@ import { decodeFullViaStreaming, decodeJointSequenceWithFeedback, updateWeightsF
 
 // alias for backwards compatibility in tests
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
-import type { FieldAssertion, FeedbackEntry, Feedback, JointSequence, RecordSpan, LineSpans, FieldSpan, SubEntitySpan } from '../lib/types.js'
+import type { FieldAssertion, FeedbackEntry, Feedback, JointSequence, RecordSpan, LineSpans, FieldSpan, EntitySpan } from '../lib/types.js'
 import { householdInfoSchema } from './test-helpers.js'
 import path from 'path'
 import { existsSync, readFileSync } from 'fs'
@@ -37,7 +37,7 @@ function ifArrayToJoint(pred: JointSequence | RecordSpan[], spans: LineSpans[]):
       // Also carry entityType info into the joint sequence so downstream
       // calls to entitiesFromJointSequence can respect asserted entity types.
       let entityType: any = undefined
-      for (const se of (r.subEntities ?? [] as SubEntitySpan[])) {
+      for (const se of (r.entities ?? [] as EntitySpan[])) {
         if (se.startLine <= li && li <= se.endLine && se.entityType !== undefined) entityType = se.entityType
         for (const f of (se.fields ?? [] as FieldSpan[])) {
           const idx = spansForLine.findIndex((s) => s.start === f.start && s.end === f.end)
@@ -203,7 +203,7 @@ function testDecodeWithFeedbackSanitizesCandidates() {
 
   // Pred should honor the asserted sub-entity entity type on the corresponding line
   const recs = res.pred as RecordSpan[]
-  assert(Boolean(recs.some(r => (r.subEntities ?? []).some((se: SubEntitySpan) => se.entityType === 'Guardian'))), 'Decoder pred should include forced entityType for line 0')
+  assert(Boolean(recs.some(r => (r.entities ?? []).some((se: EntitySpan) => se.entityType === 'Guardian'))), 'Decoder pred should include forced entityType for line 0')
 }
 
 // New test: ensure we do not preserve both a superset and an inner candidate inside an asserted sub-entity
@@ -270,7 +270,7 @@ function testAssertedFieldOnlyRemovesOverlaps() {
   const trainRes = updateWeightsFromUserFeedback(lines, spans, joint, fb, { ...weights }, boundaryFeatures, segmentFeatures, householdInfoSchema, 1.0, { maxStates: 256 })
 
   const records = entitiesFromJointSequence(lines, trainRes.spansPerLine ?? spans, ifArrayToJoint(trainRes.pred, spans), trainRes.updated, segmentFeatures, householdInfoSchema)
-  const first = records[0]!.subEntities[0]!
+  const first = records[0]!.entities[0]!
   // Do not require the fieldType to match exactly here; the important
   // invariant is that there is a single non-overlapping field covering the
   // asserted span and its confidence is boosted. Field type may vary during
@@ -295,7 +295,7 @@ function testDecodeWithForcedFieldLabel() {
   const forcedInterval = { start: 3, end: 18 }
   // The decoder may assign the forced label to any span that lies (partially) inside the asserted interval.
   const overlap = (aStart:number, aEnd:number, bStart:number, bEnd:number) => !(aEnd <= bStart || aStart >= bEnd)
-  const forcedLabelPresent = recs.some(r => (r.subEntities ?? []).some((se:any) => (se.fields ?? []).some((f:any) => f.lineIndex === 0 && overlap(f.start, f.end, forcedInterval.start, forcedInterval.end) && f.fieldType === 'Name')))
+  const forcedLabelPresent = recs.some(r => (r.entities ?? []).some((se:any) => (se.fields ?? []).some((f:any) => f.lineIndex === 0 && overlap(f.start, f.end, forcedInterval.start, forcedInterval.end) && f.fieldType === 'Name')))
   if (!forcedLabelPresent) throw new Error('expected forced label Name to be present in returned records (overlapping the asserted interval)')
 
 
@@ -472,7 +472,7 @@ function testAssertedRangesNotSubdivided() {
   // Sub-entity must not be further subdivided: all lines in the range share the asserted entityType.
   const assertedFirstRec = recs.find(r => r.startLine === 0)
   for (let li = 0; li <= 2; li++) {
-    assert(Boolean(assertedFirstRec && assertedFirstRec.subEntities && assertedFirstRec.subEntities[0] && assertedFirstRec.subEntities[0]!.entityType === 'Primary'), `line ${li} should be Primary due to sub-entity assertion`)
+    assert(Boolean(assertedFirstRec && assertedFirstRec.entities && assertedFirstRec.entities[0] && assertedFirstRec.entities[0]!.entityType === 'Primary'), `line ${li} should be Primary due to entity assertion`)
   }
 
   // Field must not be subdivided: the asserted span retains the label.

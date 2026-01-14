@@ -54,20 +54,12 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       // Text before this record (includes empty lines between records)
       if (recordStart > lastOffset) {
         const preText = text.slice(lastOffset, recordStart)
-        // Always render to preserve empty lines, but strip trailing newline
-        // since the previous record's display:block already provided line break
-        let displayText = preText
-        if (displayText.startsWith('\n')) {
-          // Skip the first newline (already provided by previous block)
-          displayText = displayText.slice(1)
-        }
-        if (displayText) {
-          elements.push(
-            <span key={`pre-${lastOffset}`} data-start={lastOffset} data-end={recordStart}>
-              {displayText}
-            </span>
-          )
-        }
+        // Always render preText exactly as-is to preserve file offsets and blank lines
+        elements.push(
+          <span key={`pre-${lastOffset}`} data-start={lastOffset} data-end={recordStart}>
+            {preText}
+          </span>
+        )
       }
 
       // Check feedback
@@ -94,23 +86,21 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       lastOffset = recordEnd
     })
 
-    // Remaining text (skip if only whitespace)
+    // Remaining text (render exactly as-is to preserve whitespace and boundaries)
     if (lastOffset < text.length) {
       const remaining = text.slice(lastOffset)
-      if (remaining.trim()) {
-        elements.push(
-          <span key={`post-${lastOffset}`} data-start={lastOffset} data-end={text.length}>
-            {remaining}
-          </span>
-        )
-      }
+      elements.push(
+        <span key={`post-${lastOffset}`} data-start={lastOffset} data-end={text.length}>
+          {remaining}
+        </span>
+      )
     }
 
     return elements
   }
 
   const renderRecordContent = (record: RecordSpan, recordIdx: number, recordStart: number, recordEnd: number): ReactNode => {
-    if (!record.subEntities || record.subEntities.length === 0) {
+    if (!record.entities || record.entities.length === 0) {
       let recordText = text.slice(recordStart, recordEnd)
       // Strip trailing newline since record is display:block
       if (recordText.endsWith('\n')) {
@@ -122,9 +112,9 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
     const elements: ReactNode[] = []
     let lastOffset = recordStart
 
-    record.subEntities.forEach((subEntity, subIdx) => {
-      const subStart = subEntity.fileStart ?? recordStart
-      const subEnd = subEntity.fileEnd ?? recordEnd
+    record.entities.forEach((entity, subIdx) => {
+      const subStart = entity.fileStart ?? recordStart
+      const subEnd = entity.fileEnd ?? recordEnd
 
       // Text before subentity (only render if there's actually a gap)
       // Avoid duplicating text that will also be rendered as fields inside the subentity.
@@ -146,26 +136,25 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       }
 
       // Check feedback
-      const subKey = `subEntity-${subStart}-${subEnd}-${subEntity.entityType}`
-      const isFeedback = feedbackSpanMap.has(subKey)
-      const spanId = `subEntity-${recordIdx}-${subIdx}`
-      const isHovered = hoverState.type === 'subEntity' && hoverState.spanId === spanId
+      const entKey = `entity-${subStart}-${subEnd}-${entity.entityType}`
+      const isFeedback = feedbackSpanMap.has(entKey)
+      const spanId = `entity-${recordIdx}-${subIdx}`
+      const isHovered = hoverState.type === 'entity' && hoverState.spanId === spanId
 
-      // Render subentity
+      // Render entity
       elements.push(
         <span
           key={spanId}
-          className={`subentity-span subentity-${(subEntity.entityType || 'unknown').toLowerCase()} ${isFeedback ? 'feedback-span' : ''} ${isHovered ? 'hovered' : ''}`}
+          className={`entity-span entity-${(entity.entityType || 'unknown').toLowerCase()} ${isFeedback ? 'feedback-span' : ''} ${isHovered ? 'hovered' : ''}`}
           data-span-id={spanId}
           data-start={subStart}
           data-end={subEnd}
-          onMouseEnter={() => setHoverState({ type: 'subEntity', value: subEntity.entityType || 'Unknown', spanId })}
+          onMouseEnter={() => setHoverState({ type: 'entity', value: entity.entityType || 'Unknown', spanId })}
           onMouseLeave={() => setHoverState({ type: null, value: null })}
         >
-          {renderSubEntityContent(subEntity, recordIdx, subIdx, subStart, subEnd)}
+          {renderEntityContent(entity, recordIdx, subIdx, subStart, subEnd)}
         </span>
       )
-
       lastOffset = subEnd
     })
 
@@ -188,14 +177,14 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
     return elements
   }
 
-  const renderSubEntityContent = (
-    subEntity: SubEntitySpan,
+  const renderEntityContent = (
+    entity: any,
     recordIdx: number,
     subIdx: number,
     subStart: number,
     subEnd: number
   ): ReactNode => {
-    if (!subEntity.fields || subEntity.fields.length === 0) {
+    if (!entity.fields || entity.fields.length === 0) {
       const subText = text.slice(subStart, subEnd)
       return <span data-start={subStart} data-end={subEnd}>{subText}</span>
     }
@@ -203,7 +192,7 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
     const elements: ReactNode[] = []
     let lastOffset = subStart
 
-    subEntity.fields.forEach((field, fieldIdx) => {
+    entity.fields.forEach((field: any, fieldIdx: number) => {
       if (field.fieldType === 'NOISE') return
 
       // Always use file positions for rendering
@@ -245,7 +234,7 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       lastOffset = fieldEnd
     })
 
-    // Remaining text in subentity
+    // Remaining text in entity
     if (lastOffset < subEnd) {
       const remaining = text.slice(lastOffset, subEnd)
       elements.push(

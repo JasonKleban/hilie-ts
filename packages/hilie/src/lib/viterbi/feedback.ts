@@ -6,7 +6,7 @@ import type {
   FieldSchema,
   Feedback,
   LineSpans,
-  SubEntityType,
+  EntityType,
   RecordSpan
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
@@ -23,7 +23,7 @@ export function buildFeedbackContext(
   const normalizedFeedback = normalizeFeedback(feedback, lines);
   const feedbackEntities = normalizedFeedback.entities;
   const recordAssertions = normalizedFeedback.records;
-  const feedbackSubEntities = normalizedFeedback.subEntities;
+  const feedbackEntitiesExplicit = normalizedFeedback.entities;
 
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({
     lineIndex: s.lineIndex,
@@ -141,7 +141,7 @@ export function buildFeedbackContext(
     return lo
   }
 
-  for (const ent of feedbackSubEntities ?? []) {
+  for (const ent of feedbackEntitiesExplicit ?? []) {
     if (ent.entityType === undefined) continue;
 
     if (ent.fileStart !== undefined && ent.fileEnd !== undefined) {
@@ -220,8 +220,8 @@ export function buildFeedbackContext(
   // partially overlap asserted intervals (partial overlaps are conflicts).
   const allowedIntervals: Record<number, Array<{ start: number; end: number }>> = {};
 
-  // Sub-entity assertions first
-  for (const fb of feedbackSubEntities ?? []) {
+  // Entity assertions first
+  for (const fb of feedbackEntitiesExplicit ?? []) {
     if (fb.fileStart === undefined || fb.fileEnd === undefined) continue;
     const fs = fb.fileStart;
     const fe = fb.fileEnd;

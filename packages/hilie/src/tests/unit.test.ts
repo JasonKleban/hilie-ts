@@ -9,7 +9,7 @@ import { defaultWeights } from '../lib/prebuilt.js';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { householdInfoSchema } from './test-helpers.js';
-import type { Feedback, JointSequence, RecordSpan, LineSpans, FieldLabel, FieldSpan, SubEntitySpan, BoundaryState } from '../lib/types.js';
+import type { Feedback, JointSequence, RecordSpan, LineSpans, FieldLabel, FieldSpan, EntitySpan, BoundaryState } from '../lib/types.js';
 // feedback tests are discovered directly by the test runner (no cross-imports)
 // (importing compiled dist test files could execute them outside the test harness)
 
@@ -47,7 +47,7 @@ function ifArrayToJoint(pred: JointSequence | RecordSpan[], spans: LineSpans[]):
       const spansForLine = spans[li]?.spans ?? []
       const fieldsArr: Array<FieldLabel | undefined> = Array(spansForLine.length).fill(undefined)
       let entityType: any = undefined
-      for (const se of (r.subEntities ?? [] as SubEntitySpan[])) {
+      for (const se of (r.entities ?? [] as EntitySpan[])) {
         if (se.startLine <= li && li <= se.endLine && se.entityType !== undefined) entityType = se.entityType
         for (const f of (se.fields ?? [] as FieldSpan[])) {
           const idx = spansForLine.findIndex((s) => s.start === f.start && s.end === f.end)
@@ -196,7 +196,7 @@ test('detect fields outside subEntity bounds (regression)', () => {
       endLine: 0,
       fileStart: 0,
       fileEnd: 32,
-      subEntities: [
+      entities: [
         {
           startLine: 0,
           endLine: 0,
@@ -496,7 +496,7 @@ test('entitiesFromJointSequence and feedback-based training', () => {
   const records = entitiesFromJointSequence(lines, spans, ifArrayToJoint(jointSeq as any, spans), w, sFeatures, schema);
   ok(Array.isArray(records) && records.length === 1, 'entitiesFromJointSequence should return one top-level record');
   const rec = records[0]!;
-  ok(Array.isArray(rec.subEntities) && rec.subEntities.length >= 1, 'record should contain sub-entities');
+  ok(Array.isArray(rec.entities) && rec.entities.length >= 1, 'record should contain entities');
 
   // flatten fields and check
   const allFields = rec.subEntities.flatMap(s => s.fields);

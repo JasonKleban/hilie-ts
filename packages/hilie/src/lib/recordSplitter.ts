@@ -1,4 +1,4 @@
-import type { RecordSpan, SubEntitySpan } from './types.js'
+import type { RecordSpan, EntitySpan } from './types.js'
 
 export async function* linesFromChunks(
   source: AsyncIterable<string>
@@ -231,10 +231,10 @@ export function recordsFromLines(lines: string[]): RecordSpan[] {
   for (const b of blocks) {
     const fileStart = offsets[b.startLine] ?? 0;
     const fileEnd = (offsets[b.endLine] ?? 0) + ((lines[b.endLine] ?? "").length ?? 0);
-    const subEntities: SubEntitySpan[] = [
+    const entities: EntitySpan[] = [
       { startLine: b.startLine, endLine: b.endLine, fileStart, fileEnd, entityType: 'Unknown', fields: [] }
     ];
-    recs.push({ startLine: b.startLine, endLine: b.endLine, fileStart, fileEnd, subEntities });
+    recs.push({ startLine: b.startLine, endLine: b.endLine, fileStart, fileEnd, entities });
   }
 
   return recs;

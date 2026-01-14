@@ -51,16 +51,16 @@ export function buildFeedbackFromHistories(entityHist: EntityAssertion[] = [], f
 
     if (hasFileOffsets) {
       if (e.entityType !== undefined) {
-        entries.push({ kind: 'subEntity', fileStart: e.fileStart, fileEnd: e.fileEnd, entityType: e.entityType as EntityType })
+        entries.push({ kind: 'entity', fileStart: e.fileStart, fileEnd: e.fileEnd, entityType: e.entityType as EntityType })
       } else {
         // No clear record mapping from file offsets; skip.
       }
     } else if (hasStartLine) {
       const endLine = (e.endLine !== undefined && e.endLine !== null) ? e.endLine : e.startLine
       if (e.entityType !== undefined) {
-        // Legacy line-based sub-entity assertion: emit a subEntity entry without
+        // Legacy line-based entity assertion: emit an entity entry without
         // file offsets. Normalization will map this to line ranges as needed.
-        entries.push({ kind: 'subEntity', entityType: e.entityType as EntityType })
+        entries.push({ kind: 'entity', entityType: e.entityType as EntityType })
       } else {
         entries.push({ kind: 'record', startLine: e.startLine, endLine })
       }
@@ -85,7 +85,7 @@ export function buildFeedbackFromHistories(entityHist: EntityAssertion[] = [], f
 export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: string[]) {
   // Chronological processing: newer entries override older conflicting ones.
   let keptRecords: RecordAssertion[] = []
-  let keptSubEntities: SubEntityAssertion[] = []
+  let keptEntities: SubEntityAssertion[] = []
   let keptFields: FieldAssertion[] = []
 
   // Precompute line starts if lines provided
@@ -125,7 +125,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
       continue
     }
 
-    if (entry.kind === 'subEntity') {
+    if (entry.kind === 'entity') {
       // If file offsets are provided, map them to line ranges using provided lines.
       // Preserve fileStart/fileEnd if provided and avoid snapping to whole lines here.
       const fs = (entry as any).fileStart as number | undefined
@@ -141,10 +141,10 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
         eLine = offsetToLine(Math.max(0, fe - 1))
       }
 
-      // Remove existing sub-entities that overlap. Prefer file-range overlap when
+      // Remove existing entities that overlap. Prefer file-range overlap when
       // both existing and incoming have file ranges; otherwise fall back to
       // line-range overlap when available.
-      keptSubEntities = keptSubEntities.filter(se => {
+      keptEntities = keptEntities.filter(se => {
         // both have file ranges
         if (se.fileStart !== undefined && se.fileEnd !== undefined && fs !== undefined && fe !== undefined) {
           return !spansOverlap(se.fileStart, se.fileEnd, fs, fe)
@@ -174,7 +174,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
       if (eLine !== undefined) newSe.endLine = eLine
       if (fs !== undefined) newSe.fileStart = fs
       if (fe !== undefined) newSe.fileEnd = fe
-      keptSubEntities.push(newSe)
+      keptEntities.push(newSe)
       continue
     }
 
@@ -218,7 +218,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
   // record container only in `entities` (do NOT treat it as a record boundary
   // assertion).
   const explicitRecordsWithFields: RecordAssertion[] = keptRecords.map(r => ({ ...r, fields: [] }))
-  const explicitSubEntitiesWithFields: SubEntityAssertion[] = keptSubEntities.map(se => ({ ...se, fields: [] }))
+  const explicitEntitiesWithFields: SubEntityAssertion[] = keptEntities.map(se => ({ ...se, fields: [] }))
   const implicitRecordContainers: RecordAssertion[] = []
 
   function findOrCreateRecordContainerForLine(lineIndex: number) {
@@ -246,9 +246,9 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
       fFileEnd = ls[li]! + f.end
     }
 
-    // Prefer to attach to a sub-entity containing the field by file offsets
+    // Prefer to attach to an explicit entity containing the field by file offsets
     let attached = false
-    for (const se of explicitSubEntitiesWithFields) {
+    for (const se of explicitEntitiesWithFields) {
       if (se.fileStart !== undefined && se.fileEnd !== undefined && fFileStart !== undefined && fFileEnd !== undefined) {
         if (spansOverlap(fFileStart, fFileEnd, se.fileStart, se.fileEnd)) {
           se.fields = pushUniqueFields(se.fields, [f])
@@ -260,7 +260,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
     if (attached) continue
 
     // Fallback to attaching by line containment
-    const sub = explicitSubEntitiesWithFields.find(se => li >= (se.startLine ?? 0) && li <= (se.endLine ?? 0))
+    const sub = explicitEntitiesWithFields.find(se => li >= (se.startLine ?? 0) && li <= (se.endLine ?? 0))
     if (sub) {
       sub.fields = pushUniqueFields(sub.fields, [f])
       continue
@@ -272,11 +272,11 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
 
   // Stable ordering
   explicitRecordsWithFields.sort((a, b) => a.startLine - b.startLine)
-  explicitSubEntitiesWithFields.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
+  explicitEntitiesWithFields.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
   implicitRecordContainers.sort((a, b) => a.startLine - b.startLine)
 
-  const entities: EntityAssertion[] = [...explicitRecordsWithFields, ...implicitRecordContainers, ...explicitSubEntitiesWithFields]
-  return { records: explicitRecordsWithFields, subEntities: explicitSubEntitiesWithFields, entities }
+  const entities: EntityAssertion[] = [...explicitRecordsWithFields, ...implicitRecordContainers, ...explicitEntitiesWithFields]
+  return { records: explicitRecordsWithFields, entities: explicitEntitiesWithFields, combinedEntities: entities }
 }
 
 export function normalizeFeedback(feedback: Feedback, lines?: string[]) {

@@ -37,7 +37,7 @@ test('splitIntoRecordsFromLines basic indentation grouping', () => {
   expect(blocks[1]!.endLine).toBe(6)
 })
 
-test('recordsFromLines produces RecordSpan-like objects with subEntities', () => {
+test('recordsFromLines produces RecordSpan-like objects with entities', () => {
   const txt = "Entity A\n\t* item 1\n\t* item 2\n"
   const lines = txt.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.length > 0)
 
@@ -48,7 +48,7 @@ test('recordsFromLines produces RecordSpan-like objects with subEntities', () =>
   const r = recs[0]!
   expect(r.startLine).toBe(0)
   expect(r.endLine).toBe(2)
-  expect(r.subEntities && r.subEntities.length).toBe(1)
+  expect(r.entities && r.entities.length).toBe(1)
   expect(typeof r.fileStart).toBe('number')
   expect(typeof r.fileEnd).toBe('number')
 })

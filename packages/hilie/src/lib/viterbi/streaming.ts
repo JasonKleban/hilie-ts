@@ -251,8 +251,8 @@ export async function decodeRecordsFromAsyncIterable(
         const shift = (deltaRec: RecordSpan) => {
           deltaRec.fileStart = (deltaRec.fileStart ?? 0) + localFileStart
           deltaRec.fileEnd = (deltaRec.fileEnd ?? 0) + localFileStart
-          if (deltaRec.subEntities) {
-            for (const se of deltaRec.subEntities) {
+          if (deltaRec.entities) {
+            for (const se of deltaRec.entities) {
               se.fileStart = (se.fileStart ?? 0) + localFileStart
               se.fileEnd = (se.fileEnd ?? 0) + localFileStart
               for (const f of se.fields) {

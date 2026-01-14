@@ -7,8 +7,8 @@ import type {
   JointSequence,
   LineSpans,
   RecordSpan,
-  SubEntitySpan,
-  SubEntityType
+  EntitySpan,
+  EntityType
 } from '../types.js';
 import type { LabelModel, SpanLabelFeatureContext } from '../labelModel.js';
 import { boundaryFeatures } from '../features.js';
@@ -126,8 +126,8 @@ export function entitiesFromJointSequence(
   featureWeights: Record<string, number> | undefined,
   segmentFeaturesArg: Feature[],
   schema: FieldSchema,
-  // Optional normalized sub-entity assertions coming from feedback (file ranges + entityType).
-  feedbackSubEntities?: { fileStart?: number; fileEnd?: number; startLine?: number; endLine?: number; entityType?: SubEntityType }[],
+  // Optional normalized entity assertions coming from feedback (file ranges + entityType).
+  feedbackEntities?: { fileStart?: number; fileEnd?: number; startLine?: number; endLine?: number; entityType?: EntityType }[],
   labelModel?: LabelModel
 ): RecordSpan[] {
   const lm: LabelModel = labelModel ?? defaultLabelModel;
@@ -180,11 +180,11 @@ export function entitiesFromJointSequence(
     const startLine = i;
     const endLine = j - 1;
 
-    const subEntities: SubEntitySpan[] = [];
+    const entities: EntitySpan[] = [];
 
     for (let li = startLine; li <= endLine; li++) {
       const role = (jointLocal[li] && jointLocal[li]!.entityType)
-        ? (jointLocal[li]!.entityType as SubEntityType)
+        ? (jointLocal[li]!.entityType as EntityType)
         : 'Unknown';
       const spans = spansPerLine[li]?.spans ?? [];
 
@@ -286,7 +286,7 @@ export function entitiesFromJointSequence(
 
       if (last && last.entityType === role) {
         last.endLine = li;
-        // When extending an existing sub-entity, extend its fileEnd to include
+        // When extending an existing entity, extend its fileEnd to include
         // any fields on this line, otherwise extend to the full line end.
         last.fileEnd = lineHasFields ? Math.max(last.fileEnd ?? 0, lineMaxEnd) : ((offsets[li] ?? 0) + (lines[li]?.length ?? 0));
         // Also ensure fileStart remains the earliest seen field start when possible.
@@ -296,7 +296,7 @@ export function entitiesFromJointSequence(
       } else {
         const fileStart = lineHasFields ? lineMinStart : (offsets[li] ?? 0);
         const fileEnd = lineHasFields ? lineMaxEnd : ((offsets[li] ?? 0) + (lines[li]?.length ?? 0));
-        subEntities.push({ startLine: li, endLine: li, fileStart, fileEnd, entityType: role, fields: lineFields });
+        entities.push({ startLine: li, endLine: li, fileStart, fileEnd, entityType: role, fields: lineFields });
       }
     }
 
@@ -310,17 +310,17 @@ export function entitiesFromJointSequence(
     const recFileStart = offsets[startLine] ?? 0;
     const recFileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
 
-    if (feedbackSubEntities && feedbackSubEntities.length > 0) {
-      for (const fb of feedbackSubEntities) {
+    if (feedbackEntities && feedbackEntities.length > 0) {
+      for (const fb of feedbackEntities) {
         if (fb.fileStart === undefined || fb.fileEnd === undefined || fb.entityType === undefined) continue
-        for (const se of subEntities) {
+        for (const se of entities) {
           if (!spansOverlap(se.fileStart, se.fileEnd, fb.fileStart, fb.fileEnd)) continue
 
           // Preserve the asserted file offsets (end-exclusive) and honor the
           // asserted entity type even when the decoder disagreed.
           se.fileStart = fb.fileStart
           se.fileEnd = fb.fileEnd
-          se.entityType = fb.entityType as SubEntityType
+          se.entityType = fb.entityType as EntityType
 
           // Recompute line bounds to be consistent with the preserved offsets.
           const offsetToLine = (off: number) => {
@@ -339,7 +339,7 @@ export function entitiesFromJointSequence(
           se.startLine = offsetToLine(se.fileStart)
           se.endLine = offsetToLine(Math.max(0, se.fileEnd - 1))
 
-          // Clamp preserved sub-entity ranges to the containing record range
+          // Clamp preserved ty ranges to the containing record range
           if (se.fileStart < recFileStart) se.fileStart = recFileStart
           if (se.fileEnd > recFileEnd) se.fileEnd = recFileEnd
         }
@@ -381,7 +381,7 @@ export function assembleRecordsFromCandidates(
   _featureWeights: Record<string, number> | undefined,
   _segmentFeaturesArg: Feature[],
   schema: FieldSchema,
-  feedbackSubEntities?: { fileStart?: number; fileEnd?: number; startLine?: number; endLine?: number; entityType?: SubEntityType }[],
+  feedbackEntities?: { fileStart?: number; fileEnd?: number; startLine?: number; endLine?: number; entityType?: EntityType }[],
   _labelModel?: LabelModel
 ): RecordSpan[] {
 
@@ -613,8 +613,8 @@ export function assembleRecordsFromCandidates(
     const recFileStart = offsets[startLine] ?? 0;
     const recFileEnd = (offsets[endLine] ?? 0) + (lines[endLine]?.length ?? 0);
 
-    if (feedbackSubEntities && feedbackSubEntities.length > 0) {
-      for (const fb of feedbackSubEntities) {
+    if (feedbackEntities && feedbackEntities.length > 0) {
+      for (const fb of feedbackities) {
         if (fb.fileStart === undefined || fb.fileEnd === undefined || fb.entityType === undefined) continue
         for (const se of subEntities) {
           if (!spansOverlap(se.fileStart, se.fileEnd, fb.fileStart, fb.fileEnd)) continue

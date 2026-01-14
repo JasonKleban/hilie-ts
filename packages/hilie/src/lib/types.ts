@@ -151,25 +151,23 @@ export interface FieldSpan {
   confidence?: number | undefined;
 }
 
-// New: sub-entity and top-level record types
-export type SubEntityType = 'Primary' | 'Guardian' | 'Unknown';
-
-export interface SubEntitySpan {
+// New: entity and top-level record types
+export interface EntitySpan {
   startLine: number;
   endLine: number;
   fileStart: number;
   fileEnd: number;
-  entityType?: SubEntityType;
+  entityType?: EntityType;
   fields: FieldSpan[];
 }
 
 export interface RecordSpan {
-  // top-level record contains one Primary and zero or more Guardian sub-entities
+  // top-level record contains one Primary and zero or more Guardian entities
   startLine: number;
   endLine: number;
   fileStart: number;
   fileEnd: number;
-  subEntities: SubEntitySpan[];
+  entities: EntitySpan[];
 }
 
 // New: per-span candidate structure emitted by the decoder to support streaming assembly
@@ -212,7 +210,7 @@ export type FeedbackEntry =
       endLine: number;
     }
   | {
-      kind: 'subEntity';
+      kind: 'entity';
       // Optional file-level offsets (character indices, end exclusive). If present,
       // these specify the assertion precisely and are used to compute line spans.
       fileStart?: number;
