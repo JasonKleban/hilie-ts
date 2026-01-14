@@ -7,6 +7,7 @@ import {
   candidateSpanGenerator,
   updateWeightsFromUserFeedback,
   normalizeFeedback,
+  recordsFromLines,
   type JointSequence,
   type RecordSpan,
   type LineSpans,
@@ -41,7 +42,7 @@ function App() {
   const [normalizedText, setNormalizedText] = useState<string>('')
   const [lines, setLines] = useState<string[]>([])
   const [spansPerLine, setSpansPerLine] = useState<LineSpans[]>([])
-  const [jointSeq, setJointSeq] = useState<JointSequence | null>(null)
+  const [jointSeq, setJointSeq] = useState<JointSequence | RecordSpan[] | null>(null)
   const [weights, setWeights] = useState<Record<string, number>>(initialWeights)
   const [feedbackEntries, setFeedbackEntries] = useState<FeedbackEntry[]>([])
   const [records, setRecords] = useState<RecordSpan[]>([])
@@ -67,6 +68,15 @@ function App() {
         setNormalizedText(normalized)
         const linesArray = normalized.split('\n')
         setLines(linesArray)
+
+        // Immediately split into top-level records for display using deterministic splitter
+        try {
+          const immediateRecords = recordsFromLines(linesArray)
+          setRecords(immediateRecords)
+        } catch (e) {
+          // fallback: leave records empty if splitter fails
+          setRecords([])
+        }
         
         // Generate candidate spans, optionally augmented with feedback positions
         let spans = candidateSpanGenerator(linesArray)
@@ -107,7 +117,7 @@ function App() {
         const decodeJointSequence = (lines: string[], spans: any, weights: any, schema: any, bF: any, sF: any, enumerateOpts?: any) =>
           decodeFullViaStreaming(lines, spans, weights, schema, bF, sF, { lookaheadLines: lines.length, enumerateOpts })
 
-        let pred: JointSequence
+        let pred: JointSequence | RecordSpan[]
         if (feedbackEntries.length > 0) {
           const analysis = analyzeFileLevelFeatures(linesArray.join('\n'))
           const result = decodeJointSequenceWithFeedback(
@@ -135,22 +145,27 @@ function App() {
           )
         }
 
-        setJointSeq(pred)
+        setJointSeq(pred as any)
 
-        const normalizedFb = normalizeFeedback({ entries: feedbackEntries }, linesArray)
-        const extractedRecords = entitiesFromJointSequence(
-          linesArray,
-          spans,
-          pred,
-          weights,
-          segmentFeatures,
-          householdInfoSchema,
-          normalizedFb.subEntities
-        )
+        // If pred is already RecordSpan[] (splitter or feedback path returns records), use it directly;
+        // otherwise, convert JointSequence -> RecordSpan[] via entitiesFromJointSequence
+        if (Array.isArray(pred) && (pred as unknown as RecordSpan[])[0]?.startLine !== undefined) {
+          setRecords(pred as unknown as RecordSpan[])
+        } else {
+          const normalizedFb = normalizeFeedback({ entries: feedbackEntries }, linesArray)
+          const extractedRecords = entitiesFromJointSequence(
+            linesArray,
+            spans,
+            pred as any,
+            weights,
+            segmentFeatures,
+            householdInfoSchema,
+            normalizedFb.subEntities
+          )
 
-        console.log('Extracted records:', JSON.stringify(extractedRecords, null, 2))
-        
-        setRecords(extractedRecords)
+          console.log('Extracted records:', JSON.stringify(extractedRecords, null, 2))
+          setRecords(extractedRecords)
+        }
       } finally {
         setIsLoading(false)
       }
@@ -281,20 +296,25 @@ function App() {
 
         setWeights(newWeights)
         if (newPred) {
-          setJointSeq(newPred)
+          setJointSeq(newPred as any)
           if (newSpans) setSpansPerLine(newSpans)
 
-          const normalizedFb = normalizeFeedback({ entries: newEntries }, lines)
-          const extractedRecords = entitiesFromJointSequence(
-            lines,
-            newSpans ?? spansPerLine,
-            newPred,
-            newWeights,
-            segmentFeatures,
-            householdInfoSchema,
-            normalizedFb.subEntities
-          )
-          setRecords(extractedRecords)
+          // If trainer returned RecordSpan[] already, use it directly; otherwise derive records
+          if (Array.isArray(newPred) && (newPred as unknown as RecordSpan[])[0]?.startLine !== undefined) {
+            setRecords(newPred as unknown as RecordSpan[])
+          } else {
+            const normalizedFb = normalizeFeedback({ entries: newEntries }, lines)
+            const extractedRecords = entitiesFromJointSequence(
+              lines,
+              newSpans ?? spansPerLine,
+              newPred as any,
+              newWeights,
+              segmentFeatures,
+              householdInfoSchema,
+              normalizedFb.subEntities
+            )
+            setRecords(extractedRecords)
+          }
         }
       } finally {
         setIsLoading(false)
@@ -522,7 +542,7 @@ function App() {
             </div>
             <div className="right-panel">
               <div className="legend">
-                <h2>Legend & Feedback</h2>
+                <h2>Feedback</h2>
                 
                 <div className="legend-section">
                   <h3>Label Selection As:</h3>
@@ -575,6 +595,7 @@ function App() {
 
                 <div className="legend-section">
                   <h3>Feedback History ({feedbackEntries.length})</h3>
+                  <div className="label-buttons">
                   <button
                     className="legend-button clear-button"
                     onClick={clearFeedback}
@@ -582,6 +603,7 @@ function App() {
                   >
                     Clear All Feedback
                   </button>
+                  </div>
                   <div className="feedback-list">
                     {feedbackEntries.length === 0 ? (
                       <div className="feedback-empty">No feedback yet</div>
@@ -596,27 +618,6 @@ function App() {
                         ))}
                       </ul>
                     )}
-                  </div>
-                </div>
-
-                <div className="legend-section">
-                  <h3>Color Legend</h3>
-                  <div className="color-legend">
-                    <div className="legend-item">
-                      <span className="color-box record-color"></span> Record
-                    </div>
-                    <div className="legend-item">
-                      <span className="color-box subentity-primary-color"></span> Primary
-                    </div>
-                    <div className="legend-item">
-                      <span className="color-box subentity-guardian-color"></span> Guardian
-                    </div>
-                    <div className="legend-item">
-                      <span className="color-box field-color"></span> Fields
-                    </div>
-                    <div className="legend-item">
-                      <span className="color-box feedback-color"></span> Feedback (brighter)
-                    </div>
                   </div>
                 </div>
               </div>

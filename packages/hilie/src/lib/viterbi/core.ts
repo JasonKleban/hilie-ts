@@ -246,13 +246,14 @@ export function decodeWindowUsingCaches(
   start: number,
   endExclusive: number,
   lines: string[],
+  spansPerLine: LineSpans[],
   featureWeights: Record<string, number>,
   schema: FieldSchema,
   caches: ReturnType<typeof prepareDecodeCaches>,
   labelModel?: LabelModel,
   incomingBeam?: BeamEntry[],
   beamSize?: number
-): { path: JointState[]; outgoingBeam?: BeamEntry[] } {
+): { path: JointState[]; outgoingBeam?: BeamEntry[]; spanCandidates?: import('../types.js').SpanCandidate[][] } {
   const lm: LabelModel = labelModel ?? defaultLabelModel;
   const windowSize = Math.max(1, endExclusive - start);
   const lattice: VCell[][] = [];
@@ -262,14 +263,31 @@ export function decodeWindowUsingCaches(
 
   const emissionScores: Array<number[]> = [];
 
+  // compute file offsets once so candidates can contain fileStart/fileEnd
+  const offsets: number[] = [];
+  let off = 0;
+  for (let i = 0; i < lines.length; i++) {
+    offsets.push(off);
+    off += (lines[i]?.length ?? 0) + 1;
+  }
+
+  // Build per-line/per-span label scores (raw) and softmax probs
+  const spanCandidatesWindow: import('../types.js').SpanCandidate[][] = [];
+  const labelOrder: string[] = schema.fields.map(f => f.name).concat(schema.noiseLabel);
+
   for (let t = start; t < endExclusive; t++) {
     emissionScores[t - start] = [];
+
+    // prepare candidates for this line
+    const lineCandArr: import('../types.js').SpanCandidate[] = [];
+
     for (let si = 0; si < stateSpaces[t]!.length; si++) {
       const s = stateSpaces[t]![si]!;
 
       const bbase = boundaryBase[t] ?? 0;
       const bcontrib = s.boundary === 'B' ? bbase : -bbase;
 
+      // compute state fcontrib by summing contributions for non-noise fields
       let fcontrib = 0;
       for (let k = 0; k < s.fields.length; k++) {
         const label = s.fields[k] ?? schema.noiseLabel;
@@ -287,7 +305,70 @@ export function decodeWindowUsingCaches(
       }
 
       emissionScores[t - start]![si] = bcontrib + fcontrib;
+
+      // For candidate-level scores, compute per-label scores for each span index
+      // note: stateSpaces[t].length equals number of spans on that line
+      const featsRec: Record<string, number> = spanFeatureCache[t]?.[si] ?? {};
+      const txt: string = spanTextCache[t]?.[si] ?? '';
+      const labelScores: Record<string, number> = {};
+
+      for (const lab of labelOrder) {
+        if (/^\s*$/.test(txt) && lab !== schema.noiseLabel) {
+          labelScores[lab] = -100;
+          continue;
+        }
+        if (lab === schema.noiseLabel) {
+          // noise label has no segment features contribution
+          labelScores[lab] = 0;
+          continue;
+        }
+        let ssum = 0;
+        for (const fid of Object.keys(featsRec)) {
+          const w = featureWeights[fid] ?? 0;
+          const v = featsRec[fid] ?? 0;
+          const ctx: SpanLabelFeatureContext = { label: lab, spanText: txt, featureId: fid, featureValue: v, schema };
+          const transformed = lm.featureContribution ? lm.featureContribution(ctx) : v;
+          ssum += w * transformed;
+        }
+        labelScores[lab] = ssum;
+      }
+
+      // compute softmax probs
+      const labs = Object.keys(labelScores);
+      const vals = labs.map(l => (labelScores[l] ?? -Infinity));
+      const maxv = Math.max(...(vals as number[]));
+      const exps = (vals as number[]).map(v => Math.exp(v - maxv));
+      const ssum = exps.reduce((a, b) => a + b, 0);
+      const probs: Record<string, number> = {};
+      for (let i = 0; i < labs.length; i++) {
+        const l = labs[i]!;
+        const v = exps[i] ?? 0;
+        probs[l] = v / (ssum || 1);
+      }
+
+      const lineSpansDef = spansPerLine[t];
+      const spanDef = lineSpansDef?.spans?.[si];
+      const startIdx = spanDef?.start ?? 0;
+      const endIdx = spanDef?.end ?? startIdx;
+      const lineStartOffset = offsets[t] ?? 0;
+
+      const spanObj: import('../types.js').SpanCandidate = {
+        lineIndex: t,
+        spanIndex: si,
+        start: startIdx,
+        end: endIdx,
+        text: txt,
+        fileStart: lineStartOffset + startIdx,
+        fileEnd: lineStartOffset + endIdx,
+        labelScores,
+        labelProbs: probs
+      };
+
+      lineCandArr.push(spanObj);
     }
+
+    // Normalize later; we'll compute actual start/end using the spansPerLine data at assembly
+    spanCandidatesWindow.push(lineCandArr);
   }
 
   // Build lattice for window
@@ -356,7 +437,7 @@ export function decodeWindowUsingCaches(
     lastIndex = lattice[t]![lastIndex]!.prev!;
   }
 
-  return { path, outgoingBeam };
+  return { path, outgoingBeam, spanCandidates: spanCandidatesWindow };
 }
 
 export function decodeJointSequence(
@@ -370,7 +451,7 @@ export function decodeJointSequence(
   labelModel?: LabelModel
 ): JointSequence {
   const caches = prepareDecodeCaches(lines, spansPerLine, featureWeights, schema, boundaryFeaturesArg, segmentFeaturesArg, enumerateOpts)
-  const res = decodeWindowUsingCaches(0, lines.length, lines, featureWeights, schema, caches, labelModel)
+  const res = decodeWindowUsingCaches(0, lines.length, lines, spansPerLine, featureWeights, schema, caches, labelModel)
   return res.path
 }
 

@@ -35,7 +35,13 @@ test('removal-edgecase deterministic negative update', () => {
   ok((w['segment.is_phone'] ?? 0) < (before['segment.is_phone'] ?? 0), 'feedback remove should decrease phone weight deterministically');
 
   // And prediction should not include Phone (removed)
-  ok(!res.pred[0]!.fields.includes('Phone'), 'after removal prediction should not include Phone');
+  const pred = res.pred
+  if (Array.isArray(pred) && pred.length > 0 && ('startLine' in (pred as any)[0])) {
+    const foundPhone = (pred as any[]).some(r => (r.subEntities ?? []).some((se: any) => (se.fields ?? []).some((f: any) => f.fieldType === 'Phone')))
+    ok(!foundPhone, 'after removal prediction should not include Phone')
+  } else {
+    ok(!((res.pred as any)[0]?.fields?.includes('Phone')), 'after removal prediction should not include Phone')
+  }
 
 
 });

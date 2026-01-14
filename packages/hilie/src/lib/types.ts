@@ -172,6 +172,25 @@ export interface RecordSpan {
   subEntities: SubEntitySpan[];
 }
 
+// New: per-span candidate structure emitted by the decoder to support streaming assembly
+export interface SpanCandidate {
+  lineIndex: number;
+  spanIndex: number;
+  start: number;
+  end: number;
+  text: string;
+  fileStart: number;
+  fileEnd: number;
+  // Raw scores for each label (including noise)
+  labelScores: Record<FieldLabel, number>;
+  // Softmax-normalized confidence per label (optional convenience)
+  labelProbs?: Record<FieldLabel, number>;
+  // Chosen label according to a JointState when applied
+  chosenLabel?: FieldLabel;
+  // Confidence of chosen label (0..1) when chosenLabel is defined
+  confidence?: number;
+}
+
 export interface FieldAssertion {
   action: 'add' | 'remove';
   lineIndex: number;

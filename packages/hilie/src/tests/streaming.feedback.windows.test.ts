@@ -2,8 +2,9 @@ import { decodeRecordsStreaming } from '../lib/viterbi/streaming.js'
 import { boundaryFeatures, segmentFeatures } from '../lib/features.js'
 import { householdInfoSchema } from './test-helpers.js'
 import { spanGenerator } from '../lib/utils.js'
+import type { Feedback } from '../lib/types.js'
 
-declare const test: any;
+declare const test: (name: string, fn: () => void) => void;
 
 // Ensure sub-entity assertions that span multiple windows are sanitized
 // deterministically and produce non-overlapping coverage per-line.
@@ -16,14 +17,14 @@ test('streaming decode with cross-window sub-entity assertion produces coverage'
   ]
 
   const spans = spanGenerator(lines, { delimiterRegex: /\t/ })
-  const weights: any = {}
+  const weights: Record<string, number> = {}
 
   // Build a sub-entity assertion that covers lines 0..2 via file offsets
   const lineStarts = (() => { const arr: number[] = []; let sum = 0; for (const l of lines) { arr.push(sum); sum += l.length + 1 } return arr })()
-  const fb: any = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
+  const fb: Feedback = { entries: [ { kind: 'subEntity', fileStart: lineStarts[0]!, fileEnd: lineStarts[2]! + lines[2]!.length, entityType: 'Guardian' } ] }
 
   // Use small lookahead to force windowed decoding across line 1/2 boundary
-  const recs = decodeRecordsStreaming(lines, spans as any, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: 2, feedback: fb, carryover: true, beam: 2 })
+  const recs = decodeRecordsStreaming(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { lookaheadLines: 2, feedback: fb, carryover: true, beam: 2 })
   if (!recs || recs.length === 0) throw new Error('expected at least one record')
 
   // Find lines 0..2 in the returned records and assert per-line non-overlap and coverage

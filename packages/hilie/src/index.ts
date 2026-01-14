@@ -8,6 +8,7 @@ export {
   updateWeightsFromUserFeedback, entitiesFromJointSequence,
   annotateEntityTypesInSequence
 } from './lib/viterbi.js';
+export { splitIntoRecordsFromLines, recordsFromLines, recordsByIndentation, linesFromChunks } from './lib/recordSplitter.js'
 export { detectDelimiter, spanGenerator, candidateSpanGenerator, coverageSpanGenerator, coverageSpanGeneratorFromCandidates } from './lib/utils.js';
 export { boundaryFeatures, segmentFeatures, analyzeFileLevelFeatures, dynamicCandidatesToFeatures } from "./lib/features.js"
 export type { FeatureCandidate, FeatureAnalysis } from './lib/features.js'

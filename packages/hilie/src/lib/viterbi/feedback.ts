@@ -5,12 +5,13 @@ import type {
   FieldLabel,
   FieldSchema,
   Feedback,
-  JointSequence,
   LineSpans,
-  SubEntityType
+  SubEntityType,
+  RecordSpan
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
 import { decodeJointSequence } from './core.js';
+import { entitiesFromJointSequence } from './entities.js';
 import type { FeatureCandidate } from '../features.js'
 import { dynamicCandidatesToFeatures } from '../features.js'
 
@@ -186,12 +187,29 @@ export function buildFeedbackContext(
       for (let li = startLine; li <= boundedEnd; li++) {
         entityTypeMap[li] = ent.entityType as SubEntityType
       }
+
+      // If this sub-entity is not inside an explicit record assertion, create
+      // implicit record boundaries so the sub-entity can be rendered as its
+      // own record (or part of one) even if no record assertion was provided.
+      // This ensures sub-entity-only feedback still results in a visible record
+      // that contains the asserted sub-entity.
+      const containedInRecord = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= startLine && r.endLine !== undefined && r.endLine >= endLine)
+      if (!containedInRecord) {
+        forcedBoundariesByLine[startLine] = 'B'
+        for (let li = startLine + 1; li <= boundedEnd; li++) forcedBoundariesByLine[li] = 'C'
+      }
     } else if (ent.startLine !== undefined) {
       const startLine = ent.startLine
       const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine;
       const boundedEnd = Math.min(endLine, spansCopy.length - 1);
       for (let li = startLine; li <= boundedEnd; li++) {
         entityTypeMap[li] = ent.entityType as SubEntityType;
+      }
+
+      const containedInRecord = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= startLine && r.endLine !== undefined && r.endLine >= endLine)
+      if (!containedInRecord) {
+        forcedBoundariesByLine[startLine] = 'B'
+        for (let li = startLine + 1; li <= boundedEnd; li++) forcedBoundariesByLine[li] = 'C'
       }
     }
   }
@@ -415,7 +433,7 @@ export function decodeJointSequenceWithFeedback(
   enumerateOpts?: EnumerateOptions,
   dynamicCandidates?: FeatureCandidate[],
   dynamicInitialWeights?: Record<string, number>
-): { pred: JointSequence; spansPerLine: LineSpans[] } {
+): { pred: RecordSpan[]; spansPerLine: LineSpans[] } {
   const fbCtx = buildFeedbackContext(lines, spansPerLine, feedback)
   const spansCopy = fbCtx.spansCopy
 
@@ -440,16 +458,18 @@ export function decodeJointSequenceWithFeedback(
     const safePrefix = (fbCtx.maxAssertedSpanIdx < 0)
       ? base.safePrefix
       : Math.max((base.safePrefix ?? 8), fbCtx.maxAssertedSpanIdx + 1);
-    return {
+    const res = {
       ...base,
       ...(safePrefix !== undefined ? { safePrefix } : {}),
       forcedLabelsByLine: fbCtx.forcedLabelsByLine,
       forcedBoundariesByLine: fbCtx.forcedBoundariesByLine,
       forcedEntityTypeByLine: fbCtx.forcedEntityTypeByLine
     } as EnumerateOptions;
+    return res;
   })();
 
   const pred = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, finalEnumerateOpts);
+
 
   for (let li = 0; li < pred.length; li++) {
     const forcedType = fbCtx.forcedEntityTypeByLine[li];
@@ -457,5 +477,7 @@ export function decodeJointSequenceWithFeedback(
     pred[li] = { ...(pred[li] ?? { boundary: 'C', fields: [] }), entityType: forcedType };
   }
 
-  return { pred, spansPerLine: spansCopy };
+  const records = entitiesFromJointSequence(lines, spansCopy, pred, weights, segmentFeatures, schema)
+
+  return { pred: records, spansPerLine: spansCopy };
 }

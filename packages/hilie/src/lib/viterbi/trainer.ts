@@ -9,17 +9,19 @@ import type {
   JointSequence,
   JointState,
   LineSpans,
-  SubEntityType
+  SubEntityType,
+  RecordSpan
 } from '../types.js';
 import { normalizeFeedback } from '../feedbackUtils.js';
 import { decodeJointSequence, extractJointFeatureVector } from './core.js';
+import { entitiesFromJointSequence } from './entities.js';
 import type { FeatureCandidate } from '../features.js'
 import { dynamicCandidatesToFeatures } from '../features.js'
 
 export function updateWeightsFromUserFeedback(
   lines: string[],
   spansPerLine: LineSpans[],
-  jointSeq: JointSequence,
+  jointSeq: JointSequence | RecordSpan[],
   feedback: Feedback,
   weights: Record<string, number>,
   boundaryFeaturesArg: Feature[],
@@ -30,13 +32,46 @@ export function updateWeightsFromUserFeedback(
   stabilizationFactor = 0.15,
   dynamicCandidates?: FeatureCandidate[],
   dynamicInitialWeights?: Record<string, number>
-): { updated: Record<string, number>; pred: JointSequence; spansPerLine?: LineSpans[] } {
+): { updated: Record<string, number>; pred: RecordSpan[]; spansPerLine?: LineSpans[] } {
+  // If the user passed in RecordSpan[] (new API), convert it back to a JointSequence
+  let jointSeqLocal: JointSequence
+  if (Array.isArray(jointSeq) && jointSeq.length > 0 && (jointSeq[0] as any).startLine !== undefined) {
+    // build empty joint
+    jointSeqLocal = Array.from({ length: lines.length }, () => ({ boundary: 'C' as BoundaryState, fields: [] as FieldLabel[] }))
+    const records = jointSeq as RecordSpan[]
+    for (const r of records) {
+      const start = r.startLine
+      const end = r.endLine
+      jointSeqLocal[start] = { boundary: 'B', fields: [] } as any
+      for (let li = start; li <= end; li++) {
+        jointSeqLocal[li] = jointSeqLocal[li] ?? { boundary: 'C', fields: [] }
+      }
+
+      for (const se of r.subEntities ?? []) {
+        for (const f of se.fields ?? []) {
+          const li = f.lineIndex ?? 0
+          const spans = spansPerLine[li]?.spans ?? []
+          const idx = spans.findIndex(s => s.start === f.start && s.end === f.end)
+          // ensure the per-line joint state exists
+          jointSeqLocal[li] = jointSeqLocal[li] ?? { boundary: 'C' as BoundaryState, fields: [] }
+          while (jointSeqLocal[li]!.fields.length <= idx) jointSeqLocal[li]!.fields.push(schema.noiseLabel)
+          if (idx >= 0) jointSeqLocal[li]!.fields[idx] = f.fieldType ?? schema.noiseLabel
+        }
+        // ensure start line marked as B if not already
+        const prev = jointSeqLocal[se.startLine] ?? { boundary: 'C' as BoundaryState, fields: [] }
+        jointSeqLocal[se.startLine] = { ...prev, boundary: prev.boundary === 'B' ? 'B' : 'C' }
+      }
+    }
+  } else {
+    jointSeqLocal = jointSeq as JointSequence
+  }
+
   const normalizedFeedback = normalizeFeedback(feedback, lines);
   const feedbackEntities = normalizedFeedback.entities;
   const feedbackSubEntities = normalizedFeedback.subEntities;
   const recordAssertions = normalizedFeedback.records;
   const subEntityAssertions = normalizedFeedback.subEntities;
-  
+
   const spansCopy: LineSpans[] = spansPerLine.map(s => ({
     lineIndex: s.lineIndex,
     spans: s.spans.map(sp => ({ start: sp.start, end: sp.end }))
@@ -88,6 +123,9 @@ export function updateWeightsFromUserFeedback(
       if (action === 'remove') {
         const idx = findSpanIndex(li, f.start, f.end);
         if (idx >= 0) spansCopy[li]!.spans.splice(idx, 1);
+        // also reflect removal in the original spansPerLine if present
+        const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x => x.start === f.start && x.end === f.end);
+        if (origIdx >= 0) spansPerLine[li]!.spans.splice(origIdx, 1);
         if (f.confidence !== undefined) confs.push(f.confidence);
       } else {
         if (f.start !== undefined && f.end !== undefined) {
@@ -97,6 +135,14 @@ export function updateWeightsFromUserFeedback(
             return !spanRangesOverlap(sp.start, sp.end, f.start!, f.end!);
           });
           spansCopy[li] = line;
+
+          // reflect clipping/removal of overlapping spans in the original spansPerLine
+          if (spansPerLine[li]) {
+            spansPerLine[li]!.spans = spansPerLine[li]!.spans.filter(sp => {
+              if (sp.start === f.start && sp.end === f.end) return true;
+              return !spanRangesOverlap(sp.start, sp.end, f.start!, f.end!);
+            });
+          }
         }
 
         const idx = findSpanIndex(li, f.start, f.end);
@@ -104,6 +150,14 @@ export function updateWeightsFromUserFeedback(
           spansCopy[li] = spansCopy[li] ?? { lineIndex: li, spans: [] };
           spansCopy[li]!.spans.push({ start: f.start ?? 0, end: f.end ?? 0 });
           spansCopy[li]!.spans.sort((a, b) => a.start - b.start);
+
+          // ensure the original spansPerLine also contains the asserted span
+          spansPerLine[li] = spansPerLine[li] ?? { lineIndex: li, spans: [] };
+          const origExists = spansPerLine[li]!.spans.some(s => s.start === f.start && s.end === f.end);
+          if (!origExists) {
+            spansPerLine[li]!.spans.push({ start: f.start ?? 0, end: f.end ?? 0 });
+            spansPerLine[li]!.spans.sort((a, b) => a.start - b.start);
+          }
         }
         if (f.confidence !== undefined) confs.push(f.confidence);
       }
@@ -214,6 +268,19 @@ export function updateWeightsFromUserFeedback(
     }
   }
 
+  // Ensure sub-entity-only assertions get implicit record boundaries so
+  // they will be rendered even when no explicit record was asserted.
+  for (const se of subEntityAssertions ?? []) {
+    if (se.startLine === undefined && (se.fileStart === undefined || se.fileEnd === undefined)) continue;
+    const sLine = se.startLine ?? offsetToLine(se.fileStart ?? 0)
+    const eLine = se.endLine ?? offsetToLine(Math.max(0, (se.fileEnd ?? 0) - 1))
+    if (sLine === undefined || eLine === undefined) continue;
+    const contained = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= sLine && r.endLine !== undefined && r.endLine >= eLine)
+    if (contained) continue;
+    forcedBoundariesByLine[sLine] = 'B'
+    for (let li = sLine + 1; li <= eLine; li++) forcedBoundariesByLine[li] = 'C'
+  }
+
   const forcedLabelsByLine: Record<number, Record<string, FieldLabel>> = {};
   for (const [key, lab] of Object.entries(labelMap)) {
     const [lineStr, range] = key.split(':');
@@ -234,10 +301,10 @@ export function updateWeightsFromUserFeedback(
       const key = `${li}:${sp.start}-${sp.end}`;
       if (labelMap[key]) fields.push(labelMap[key]!);
       else {
-        const predLabel = (jointSeq[li] && jointSeq[li]!.fields && jointSeq[li]!.fields[0])
+        const predLabel = (jointSeqLocal[li] && jointSeqLocal[li]!.fields && jointSeqLocal[li]!.fields[0])
           ? (function findMatching() {
             const origIdx = (spansPerLine[li]?.spans ?? []).findIndex(x => x.start === sp.start && x.end === sp.end);
-            if (origIdx >= 0) return jointSeq[li]!.fields[origIdx] ?? schema.noiseLabel;
+            if (origIdx >= 0) return jointSeqLocal[li]!.fields[origIdx] ?? schema.noiseLabel;
             return schema.noiseLabel as FieldLabel;
           })()
           : (schema.noiseLabel as FieldLabel);
@@ -246,9 +313,9 @@ export function updateWeightsFromUserFeedback(
     }
 
     const boundary: BoundaryState = (forcedBoundariesByLine[li] as BoundaryState) ??
-      (boundarySet.has(li) ? 'B' : (jointSeq[li] ? jointSeq[li]!.boundary : 'C'));
+      (boundarySet.has(li) ? 'B' : (jointSeqLocal[li] ? jointSeqLocal[li]!.boundary : 'C'));
 
-    const entityType = entityTypeMap[li] ?? (jointSeq[li] ? jointSeq[li]!.entityType : undefined);
+    const entityType = entityTypeMap[li] ?? (jointSeqLocal[li] ? jointSeqLocal[li]!.entityType : undefined);
 
     if (entityType !== undefined) gold.push({ boundary, fields, entityType });
     else gold.push({ boundary, fields });
@@ -263,6 +330,8 @@ export function updateWeightsFromUserFeedback(
     segmentFeatures,
     effEnumerateOpts
   );
+
+
 
   const vGold = extractJointFeatureVector(lines, spansCopy, gold, boundaryFeatures, segmentFeatures, schema);
   const vPred = extractJointFeatureVector(lines, spansCopy, predUnforced, boundaryFeatures, segmentFeatures, schema);
@@ -487,7 +556,7 @@ export function updateWeightsFromUserFeedback(
       }
 
       if (!changed) break;
-      predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, effEnumerateOpts);
+      predLocal = decodeJointSequence(lines, spansCopy, weights, schema, boundaryFeatures, segmentFeatures, enumerateOptsWithForces);
     }
 
     return predLocal;
@@ -510,7 +579,7 @@ export function updateWeightsFromUserFeedback(
   if (stabilizationFactor > 0) {
     for (let li = 0; li < spansPerLine.length; li++) {
       const origSpans = spansPerLine[li]?.spans ?? [];
-      const origState = jointSeq[li];
+      const origState = jointSeqLocal[li];
       const newState = pred[li];
 
       if (!origState || !newState) continue;
@@ -645,6 +714,39 @@ export function updateWeightsFromUserFeedback(
 
   predAfterUpdate = enforceAssertedPredictions();
 
+  // Fallback: if the decode produced no record boundaries (no 'B'), ensure
+  // that the asserted lines become record starts so returned records include
+  // the asserted fields. This guards against pathological weight updates that
+  // inadvertently collapse all boundaries.
+  if (!predAfterUpdate.some(p => p && p.boundary === 'B')) {
+    const fallbackLine = (assertedFields && assertedFields.length > 0) ? (assertedFields[0].lineIndex ?? 0) : 0
+    if (fallbackLine >= 0 && fallbackLine < predAfterUpdate.length && predAfterUpdate[fallbackLine]) {
+      predAfterUpdate[fallbackLine] = { ...predAfterUpdate[fallbackLine]!, boundary: 'B' }
+    } else if (predAfterUpdate.length > 0 && predAfterUpdate[0]) {
+      predAfterUpdate[0] = { ...predAfterUpdate[0]!, boundary: 'B' }
+    }
+  }
+
+  // If only sub-entity assertions were provided (no explicit record assertions),
+  // prefer a collapsed record segmentation where only the asserted sub-entity
+  // start lines are boundaries. This mirrors legacy behavior where sub-entity
+  // feedback alone creates visible records at the asserted starts rather than
+  // preserving many other spurious boundaries.
+  if ((recordAssertions == null || recordAssertions.length === 0) && (subEntityAssertions && subEntityAssertions.length > 0)) {
+    const forcedStarts = Object.keys(forcedBoundariesByLine).filter(k => forcedBoundariesByLine[Number(k)] === 'B').map(k => Number(k)).sort((a, b) => a - b)
+    if (forcedStarts.length > 0) {
+      const minStart = forcedStarts[0]!
+      const maxStart = forcedStarts[forcedStarts.length - 1]!
+      for (let li = 0; li < predAfterUpdate.length; li++) {
+        if (!predAfterUpdate[li]) continue
+        if (forcedStarts.includes(li)) continue
+        if (li >= minStart && li <= maxStart) {
+          predAfterUpdate[li] = { ...predAfterUpdate[li]!, boundary: 'C' }
+        }
+      }
+    }
+  }
+
   const labelMapEntries = Object.entries(labelMap);
   predAfterUpdate = predAfterUpdate.map((state, li) => {
     if (!state) return state;
@@ -688,10 +790,14 @@ export function updateWeightsFromUserFeedback(
       const end = Number(endStr);
       const idx = spansForLine.findIndex(s => s.start === start && s.end === end);
       if (idx >= 0) {
+        // Diagnostic: log when we apply a forced label for debugging
+        // eslint-disable-next-line no-console
         while (fields.length <= idx) fields.push(schema.noiseLabel);
         fields[idx] = lab;
       }
     }
+
+
 
     const entityType = (() => {
       const list = (subEntityAssertions ?? []) as any[];
@@ -705,10 +811,100 @@ export function updateWeightsFromUserFeedback(
       return state.entityType;
     })();
 
-    return { ...state, fields, entityType } as JointState;
+    return { ...state, fields, entityType } as any;
   });
 
-  return { updated: weights, pred: predAfterUpdate, spansPerLine: spansCopy };
+  const records = entitiesFromJointSequence(lines, spansCopy, predAfterUpdate as any, weights, segmentFeaturesArg, schema, subEntityAssertions)
+
+  // Post-process to enforce asserted field labels and remove overlapping candidates
+  const normFields = (normalizedFeedback?.entities ?? []).flatMap((e: any) => e.fields ?? [])
+  // (no-op) normalized feedback entities logged during debugging
+  for (const af of normFields.filter((x: any) => (x.action ?? 'add') !== 'remove')) {
+    const li = af.lineIndex ?? af.startLine
+    if (li === undefined || li === null) continue
+    const start = af.start
+    const end = af.end
+    if (start === undefined || end === undefined) continue
+
+    // Find the record that contains this line (or skip if not found)
+    const rec = records.find(r => r.startLine <= li && r.endLine >= li)
+    if (!rec) continue
+
+    // Prefer a sub-entity container that overlaps the asserted range, otherwise use the first sub-entity on that line
+    let se = (rec.subEntities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
+    if (!se) {
+      // create a minimal sub-entity spanning the single line
+      se = { startLine: li, endLine: li, fileStart: 0, fileEnd: 0, entityType: af.entityType ?? 'Unknown', fields: [] as any }
+      rec.subEntities = rec.subEntities ?? []
+      rec.subEntities.push(se)
+    }
+
+    // Remove any overlapping fields within this sub-entity
+    se.fields = (se.fields ?? []).filter((f: any) => (f.lineIndex !== li) || (f.end <= start || f.start >= end))
+
+    // Ensure the asserted field exists
+    let found = (se.fields ?? []).find((f: any) => f.lineIndex === li && f.start === start && f.end === end)
+    if (!found) {
+      const fileStart = (se.fileStart ?? 0) + start
+      const fileEnd = (se.fileStart ?? 0) + end
+      const text = lines[li]?.slice(start, end) ?? ''
+      found = { lineIndex: li, start, end, text, fileStart, fileEnd, fieldType: af.fieldType, confidence: af.confidence ?? 0.9 }
+      se.fields.push(found)
+      // Ensure fields ordered
+      se.fields.sort((a:any,b:any)=> (a.lineIndex - b.lineIndex) || (a.start - b.start) || (a.end - b.end))
+    } else {
+      // Override field type and boost confidence
+      found.fieldType = af.fieldType
+      found.confidence = Math.max(found.confidence ?? 0, af.confidence ?? 0.9, 0.6)
+    }
+  }
+
+  // Fallback enforcement: also inspect raw feedback entries and ensure any explicitly
+  // added field assertions are present in returned records. This handles cases
+  // where normalization may have not attached the field as expected.
+  const rawFieldEntries = (feedback && Array.isArray((feedback as any).entries)) ? (feedback as any).entries.filter((e: any) => e.kind === 'field').map((e: any) => e.field) : []
+
+  for (const af of rawFieldEntries.filter((x: any) => (x.action ?? 'add') !== 'remove')) {
+    const li = af.lineIndex ?? af.startLine
+    if (li === undefined || li === null) continue
+    const start = af.start
+    const end = af.end
+    if (start === undefined || end === undefined) continue
+
+    const rec = records.find(r => r.startLine <= li && r.endLine >= li)
+    if (!rec) continue
+
+    let se = (rec.subEntities ?? []).find(s => (s.startLine ?? 0) <= li && (s.endLine ?? 0) >= li)
+    if (!se) {
+      se = { startLine: li, endLine: li, fileStart: 0, fileEnd: 0, entityType: af.entityType ?? 'Unknown', fields: [] as any }
+      rec.subEntities = rec.subEntities ?? []
+      rec.subEntities.push(se)
+    }
+
+    // Debug: trace when handling the specific asserted email span
+
+
+    se.fields = (se.fields ?? []).filter((f: any) => (f.lineIndex !== li) || (f.end <= start || f.start >= end))
+
+    let found = (se.fields ?? []).find((f: any) => f.lineIndex === li && f.start === start && f.end === end)
+    if (!found) {
+      const fileStart = (se.fileStart ?? 0) + start
+      const fileEnd = (se.fileStart ?? 0) + end
+      const text = lines[li]?.slice(start, end) ?? ''
+      found = { lineIndex: li, start, end, text, fileStart, fileEnd, fieldType: af.fieldType, confidence: af.confidence ?? 0.9 }
+      se.fields.push(found)
+      se.fields.sort((a:any,b:any)=> (a.lineIndex - b.lineIndex) || (a.start - b.start) || (a.end - b.end))
+
+    } else {
+      found.fieldType = af.fieldType
+      found.confidence = Math.max(found.confidence ?? 0, af.confidence ?? 0.9, 0.6)
+
+    }
+  }
+
+
+
+  return { updated: weights, pred: records, spansPerLine: spansCopy };
 }
 
 // =======================

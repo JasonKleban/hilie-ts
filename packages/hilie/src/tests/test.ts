@@ -59,8 +59,9 @@ async function runDataDrivenTests() {
 
     const spansPerLine = spanGenerator(lines);
 
-    const jointSeq = decodeJointSequence(lines, spansPerLine, jointWeights, householdInfoSchema, bFeatures, sFeatures, { maxStates: 512, safePrefix: 6 });
-    const records = entitiesFromJointSequence(lines, spansPerLine, jointSeq, jointWeights, sFeatures, householdInfoSchema);
+    const recs = decodeJointSequence(lines, spansPerLine, jointWeights, householdInfoSchema, bFeatures, sFeatures, { maxStates: 512, safePrefix: 6 });
+    // decodeFullViaStreaming returns RecordSpan[]; use directly when present
+    const records = (Array.isArray(recs) && recs.length > 0 && ('startLine' in (recs as any)[0])) ? (recs as any) : entitiesFromJointSequence(lines, spansPerLine, recs as any, jointWeights, sFeatures, householdInfoSchema);
 
     console.info(`decoded ${records.length} records, spans lines ${spansPerLine.length}`);
 
