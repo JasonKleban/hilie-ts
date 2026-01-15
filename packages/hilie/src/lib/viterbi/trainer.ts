@@ -228,18 +228,18 @@ export function updateWeightsFromUserFeedback(
   }
 
   for (const ent of feedbackEntities ?? []) {
-    if (ent.entityType === undefined) continue;
+    if ((ent as any).entityType === undefined) continue;
 
-    if (ent.fileStart !== undefined && ent.fileEnd !== undefined) {
-      const startLine = offsetToLine(ent.fileStart)
-      const endLine = offsetToLine(Math.max(0, ent.fileEnd - 1))
+    if ((ent as any).fileStart !== undefined && (ent as any).fileEnd !== undefined) {
+      const startLine = offsetToLine((ent as any).fileStart)
+      const endLine = offsetToLine(Math.max(0, (ent as any).fileEnd - 1))
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
-      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as EntityType
-    } else if (ent.startLine !== undefined) {
-      const startLine = ent.startLine
-      const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine
+      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = (ent as any).entityType as EntityType
+    } else if ((ent as any).startLine !== undefined) {
+      const startLine = (ent as any).startLine
+      const endLine = ((ent as any).endLine !== undefined && (ent as any).endLine >= startLine) ? (ent as any).endLine : startLine
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
-      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = ent.entityType as EntityType
+      for (let li = startLine; li <= boundedEnd; li++) entityTypeMap[li] = (ent as any).entityType as EntityType
     }
   }
 
@@ -294,9 +294,9 @@ export function updateWeightsFromUserFeedback(
   // Ensure entity-only assertions get implicit record boundaries so
   // they will be rendered even when no explicit record was asserted.
   for (const se of entityAssertions ?? []) {
-    if (se.startLine === undefined && (se.fileStart === undefined || se.fileEnd === undefined)) continue;
-    const sLine = se.startLine ?? offsetToLine(se.fileStart ?? 0)
-    const eLine = se.endLine ?? offsetToLine(Math.max(0, (se.fileEnd ?? 0) - 1))
+    if ((se as any).startLine === undefined && ((se as any).fileStart === undefined || (se as any).fileEnd === undefined)) continue;
+    const sLine = (se as any).startLine ?? offsetToLine((se as any).fileStart ?? 0)
+    const eLine = (se as any).endLine ?? offsetToLine(Math.max(0, ((se as any).fileEnd ?? 0) - 1))
     if (sLine === undefined || eLine === undefined) continue;
     const contained = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= sLine && r.endLine !== undefined && r.endLine >= eLine)
     if (contained) continue;

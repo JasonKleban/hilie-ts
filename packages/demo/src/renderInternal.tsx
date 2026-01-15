@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react'
 import type { RecordSpan, FeedbackEntry } from 'hilie'
 
+// Debug capture for tests
+export const __DEBUG_EMITTED_RAWS: any[] = []
+let __DEBUG_CAPTURE = false
+export function __DEBUG_SET_CAPTURE(v: boolean) { __DEBUG_CAPTURE = !!v }
+
 export interface RenderOptions {
   text: string
   records: RecordSpan[]
@@ -20,6 +25,11 @@ export interface RenderOptions {
  */
 export function renderWithSpans(options: RenderOptions): ReactNode {
   const { text, records, feedbackEntries, hoverState, setHoverState } = options
+
+  // Debug capture for tests (uses module-level capture)
+  function pushDebug(s: number, e: number, key?: string) {
+    if (__DEBUG_CAPTURE) __DEBUG_EMITTED_RAWS.push({ s, e, key: key ?? `${s}-${e}`, stack: (new Error().stack ?? '').toString() })
+  }
 
   // Build a map of feedback spans for visual distinction
   const feedbackSpanMap = new Map<string, boolean>()
@@ -41,7 +51,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
   // Render records
   const renderRecords = () => {
     if (records.length === 0) {
-      return <div className="no-records" data-start={0} data-end={text.length}>{text}</div>
+      pushDebug(0, text.length, 'no-records')
+      return <div className="no-records raw-text" data-file-start={0} data-file-end={text.length}>{text}</div>
     }
 
     const elements: ReactNode[] = []
@@ -55,8 +66,9 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       if (recordStart > lastOffset) {
         const preText = text.slice(lastOffset, recordStart)
         // Always render preText exactly as-is to preserve file offsets and blank lines
+        pushDebug(lastOffset, recordStart, `pre-${lastOffset}`)
         elements.push(
-          <span key={`pre-${lastOffset}`} data-start={lastOffset} data-end={recordStart}>
+          <span key={`pre-${lastOffset}`} className="raw-text" data-file-start={lastOffset} data-file-end={recordStart}>
             {preText}
           </span>
         )
@@ -74,8 +86,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
           key={spanId}
           className={`record-span ${isFeedback ? 'feedback-span' : ''} ${isHovered ? 'hovered' : ''}`}
           data-span-id={spanId}
-          data-start={recordStart}
-          data-end={recordEnd}
+          data-file-start={recordStart}
+          data-file-end={recordEnd}
           onMouseEnter={() => setHoverState({ type: 'record', value: 'Record', spanId })}
           onMouseLeave={() => setHoverState({ type: null, value: null })}
         >
@@ -106,7 +118,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       if (recordText.endsWith('\n')) {
         recordText = recordText.slice(0, -1)
       }
-      return <span data-start={recordStart} data-end={recordEnd}>{recordText}</span>
+      pushDebug(recordStart, recordEnd, `record-text-${recordStart}`)
+      return <span className="raw-text" data-file-start={recordStart} data-file-end={recordEnd}>{recordText}</span>
     }
 
     const elements: ReactNode[] = []
@@ -128,8 +141,10 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
         if (preText.length > 0) {
           //console.log(`Gap detected: rendering pre-text from ${lastOffset} to ${preEnd}: "${preText}"`)
         }
+        pushDebug(lastOffset, preEnd, `pre-sub-${subIdx}`)
+        const cls = preText.includes('\n') ? (preText.includes('\n\t') || preText.includes('\n  ') ? 'raw-text raw-block raw-continuation' : 'raw-text raw-block') : 'raw-text'
         elements.push(
-          <span key={`pre-${subIdx}`} data-start={lastOffset} data-end={preEnd}>
+          <span key={`pre-${subIdx}`} className={cls} data-file-start={lastOffset} data-file-end={preEnd}>
             {preText}
           </span>
         )
@@ -147,8 +162,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
           key={spanId}
           className={`entity-span entity-${(entity.entityType || 'unknown').toLowerCase()} ${isFeedback ? 'feedback-span' : ''} ${isHovered ? 'hovered' : ''}`}
           data-span-id={spanId}
-          data-start={subStart}
-          data-end={subEnd}
+          data-file-start={subStart}
+          data-file-end={subEnd}
           onMouseEnter={() => setHoverState({ type: 'entity', value: entity.entityType || 'Unknown', spanId })}
           onMouseLeave={() => setHoverState({ type: null, value: null })}
         >
@@ -166,8 +181,10 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
         remaining = remaining.slice(0, -1)
       }
       if (remaining) {
+        pushDebug(lastOffset, recordEnd, `post-${lastOffset}`)
+        const cls = remaining.includes('\n') ? 'raw-text raw-block' : 'raw-text'
         elements.push(
-          <span key={`post`} data-start={lastOffset} data-end={recordEnd}>
+          <span key={`post`} className={cls} data-file-start={lastOffset} data-file-end={recordEnd}>
             {remaining}
           </span>
         )
@@ -186,7 +203,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
   ): ReactNode => {
     if (!entity.fields || entity.fields.length === 0) {
       const subText = text.slice(subStart, subEnd)
-      return <span data-start={subStart} data-end={subEnd}>{subText}</span>
+      pushDebug(subStart, subEnd, `entity-text-${subStart}`)
+      return <span className="raw-text" data-file-start={subStart} data-file-end={subEnd}>{subText}</span>
     }
 
     const elements: ReactNode[] = []
@@ -202,8 +220,9 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
       // Text before field
       if (fieldStart > lastOffset) {
         const preText = text.slice(lastOffset, fieldStart)
+        pushDebug(lastOffset, fieldStart, `pre-field-${fieldIdx}`)
         elements.push(
-          <span key={`pre-${fieldIdx}`} data-start={lastOffset} data-end={fieldStart}>
+          <span key={`pre-${fieldIdx}`} className="raw-text" data-file-start={lastOffset} data-file-end={fieldStart}>
             {preText}
           </span>
         )
@@ -222,8 +241,8 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
           key={spanId}
           className={`field-span field-${(field.fieldType || 'unknown').toLowerCase()} ${isFeedback ? 'feedback-span' : ''} ${isHovered ? 'hovered' : ''}`}
           data-span-id={spanId}
-          data-start={fieldStart}
-          data-end={fieldEnd}
+          data-file-start={fieldStart}
+          data-file-end={fieldEnd}
           onMouseEnter={() => setHoverState({ type: 'field', value: field.fieldType || 'Unknown', spanId })}
           onMouseLeave={() => setHoverState({ type: null, value: null })}
         >
@@ -237,8 +256,10 @@ export function renderWithSpans(options: RenderOptions): ReactNode {
     // Remaining text in entity
     if (lastOffset < subEnd) {
       const remaining = text.slice(lastOffset, subEnd)
+      pushDebug(lastOffset, subEnd, `post-entity-${lastOffset}`)
+      const cls = remaining.includes('\n') ? (remaining.includes('\n\t') || remaining.includes('\n  ') ? 'raw-text raw-block raw-continuation' : 'raw-text raw-block') : 'raw-text'
       elements.push(
-        <span key={`post`} data-start={lastOffset} data-end={subEnd}>
+        <span key={`post`} className={cls} data-file-start={lastOffset} data-file-end={subEnd}>
           {remaining}
         </span>
       )

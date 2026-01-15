@@ -1,17 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { renderWithSpans } from '../renderInternal'
+import { renderWithSpans } from '../renderInternal.js'
 import { renderToString } from 'react-dom/server'
 
 describe('renderWithSpans - boundary alignment', () => {
   it('does not duplicate text when subEntity starts mid-record', () => {
     const text = '  * Joshua Anderson (Grandparent)'
-    const records = [
+    const records: any = [
       {
         startLine: 0,
         endLine: 0,
         fileStart: 0,
         fileEnd: 33,
-        subEntities: [
+        entities: [
           {
             startLine: 0,
             endLine: 0,
@@ -43,13 +43,13 @@ describe('renderWithSpans - boundary alignment', () => {
 
   it('handles exact feedback position boundaries with leading tab', () => {
     const text = '\t* Joshua Anderson (Grandparent)'
-    const records = [
+    const records: any = [
       {
         startLine: 0,
         endLine: 0,
         fileStart: 0,
         fileEnd: text.length,
-        subEntities: [
+        entities: [
           { startLine: 0, endLine: 0, fileStart: 2, fileEnd: text.length, entityType: 'Guardian', fields: [] }
         ]
       }

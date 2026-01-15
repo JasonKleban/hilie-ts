@@ -5,8 +5,8 @@ import { candidateSpanGenerator, decodeFullViaStreaming, entitiesFromJointSequen
 const decodeJointSequence = (lines: string[], spans: any, weights: any, schema: any, bFeatures: any, sFeatures: any, enumerateOpts?: any) =>
   decodeFullViaStreaming(lines, spans, weights, schema, bFeatures, sFeatures, { lookaheadLines: lines.length, enumerateOpts: enumerateOpts })
 import { boundaryFeatures, segmentFeatures } from 'hilie'
-import { renderWithSpans } from '../renderInternal'
-import { householdInfoSchema } from '../schema'
+import { renderWithSpans } from '../renderInternal.js'
+import { householdInfoSchema } from '../schema.js'
 
 console.log('Demo render test: duplicate raw-text span check')
 
@@ -29,7 +29,10 @@ const weights = {
 }
 
 const pred = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
-const records = entitiesFromJointSequence(lines, spans, pred, weights, segmentFeatures, householdInfoSchema)
+let records = entitiesFromJointSequence(lines, spans, pred as any, weights, segmentFeatures, householdInfoSchema)
+if ((!records || records.length === 0) && Array.isArray(pred) && (pred[0]?.startLine !== undefined)) {
+  records = pred as any
+}
 
 // Quick inspection: find records/sub-entities/fields that overlap the suspect 84-85 range
 for (const r of records) {
@@ -48,9 +51,9 @@ for (const r of records) {
 // (instrumentation via module patching removed; using renderer debug buffer instead)
 
 // Enable debug capture in renderer
-import { __DEBUG_EMITTED_RAWS, __DEBUG_SET_CAPTURE } from '../renderInternal'
+import { __DEBUG_EMITTED_RAWS, __DEBUG_SET_CAPTURE } from '../renderInternal.js'
 __DEBUG_SET_CAPTURE(true)
-const elements = renderWithSpans(normalized, records, { type: null, value: null }, () => {})
+const elements = renderWithSpans({ text: normalized, records, feedbackEntries: [], hoverState: { type: null, value: null }, setHoverState: () => {} })
 
 // Ensure record spans have hover handlers so the UI can expand selection on legend hover
 let foundRecordHover = false
@@ -76,7 +79,7 @@ if (__DEBUG_EMITTED_RAWS.length > 0) {
 }
 
 // Inspect specific small-range problematic anchors (e.g., 84-85)
-const suspect = __DEBUG_EMITTED_RAWS.filter(x => x.s === 84 && x.e === 85)
+const suspect = __DEBUG_EMITTED_RAWS.filter((x: any) => x.s === 84 && x.e === 85)
 if (suspect.length) {
   console.log('Found emissions for 84-85:')
   for (const s of suspect) console.log(s.stack)
@@ -214,7 +217,7 @@ function simulateRenderWithoutGlobalDedupe(text: string, records: any[]) {
 
   for (const r of records) {
     if (r.fileStart && out.length && out[out.length-1].end < r.fileStart) out.push(renderRaw(out[out.length-1].end, r.fileStart, `text-${out[out.length-1].end}`))
-    const recElems = renderSubEntitiesSim(text, r.subEntities ?? [], r.fileStart, r.fileEnd)
+    const recElems = renderSubEntitiesSim(text, r.entities ?? [], r.fileStart, r.fileEnd)
     out.push({ type:'record', start: r.fileStart, end: r.fileEnd, children: recElems, r })
   }
   return out
@@ -254,9 +257,9 @@ console.log('Demo render test: hanging-indent continuation check')
 const small = `Item: one\n  continued text for item\n` // newline+indent continuation
 const manualRecords: any[] = [{
   startLine: 0, endLine: 1, fileStart: 0, fileEnd: small.length,
-  subEntities: [{ fileStart: 0, fileEnd: small.length, entityType: 'Primary', fields: [{ fileStart: 0, fileEnd: 5, fieldType: 'Name', confidence: 1.0 }] }]
+  entities: [{ fileStart: 0, fileEnd: small.length, entityType: 'Primary', fields: [{ fileStart: 0, fileEnd: 5, fieldType: 'Name', confidence: 1.0 }] }]
 }]
-const smallElements = renderWithSpans(small, manualRecords, { type: null, value: null }, () => {})
+const smallElements = renderWithSpans({ text: small, records: manualRecords, feedbackEntries: [], hoverState: { type: null, value: null }, setHoverState: () => {} })
 let foundContinuation = false
 function walkElems(el: any) {
   if (!el) return
@@ -333,7 +336,7 @@ console.log('Demo render test: subEntity boundary rendering check')
 const specificText = '  * Joshua Anderson (Grandparent)'
 const specificRecords: any[] = [{
   startLine: 0, endLine: 0, fileStart: 0, fileEnd: specificText.length,
-  subEntities: [
+  entities: [
     {
       startLine: 0, endLine: 0, fileStart: 10, fileEnd: specificText.length,
       entityType: 'Guardian',
@@ -346,7 +349,7 @@ const specificRecords: any[] = [{
   ]
 }]
 
-const specificElements = renderWithSpans(specificText, specificRecords, { type: null, value: null }, () => {})
+const specificElements = renderWithSpans({ text: specificText, records: specificRecords, feedbackEntries: [], hoverState: { type: null, value: null }, setHoverState: () => {} })
 
 // Collect raw-text spans and the concatenated visible text
 const seenKeys = new Set()

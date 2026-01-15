@@ -16,8 +16,8 @@ import {
 } from 'hilie'
 import { boundaryFeatures, segmentFeatures } from 'hilie'
 import './App.css'
-import { householdInfoSchema } from './schema'
-import { renderWithSpans } from './renderInternal'
+import { householdInfoSchema } from './schema.js'
+import { renderWithSpans } from './renderInternal.js'
 
 const initialWeights = {
   'line.indentation_delta': 0.5,
@@ -152,15 +152,81 @@ function App() {
           setRecords(pred as unknown as RecordSpan[])
         } else {
           const normalizedFb = normalizeFeedback({ entries: feedbackEntries }, linesArray)
-          const extractedRecords = entitiesFromJointSequence(
+          // Use combinedEntities so implicit record/line containers created for field-only
+          // feedback are included (ensures field-only assertions produce visible records).
+          let extractedRecords = entitiesFromJointSequence(
             linesArray,
             spans,
             pred as any,
             weights,
             segmentFeatures,
             householdInfoSchema,
-            normalizedFb.entities
+            normalizedFb.combinedEntities
           )
+
+          // Fallback: when entitiesFromJointSequence yielded no records, but
+          // normalized feedback included implicit record containers or field-only
+          // assertions (combinedEntities), synthesize minimal RecordSpan[] so
+          // field-only feedback appears immediately in the UI without running
+          // a training pass.
+          if ((!extractedRecords || extractedRecords.length === 0) && (normalizedFb.combinedEntities && normalizedFb.combinedEntities.length > 0)) {
+            const lineStarts: number[] = []
+            let off = 0
+            for (let i = 0; i < linesArray.length; i++) {
+              lineStarts.push(off)
+              off += (linesArray[i]?.length ?? 0) + 1
+            }
+
+            const recs: RecordSpan[] = []
+            for (const ce of normalizedFb.combinedEntities) {
+              // Record-like containers (explicit or implicit)
+              if ((ce as any).startLine !== undefined) {
+                const start = (ce as any).startLine
+                const end = (ce as any).endLine ?? start
+                const fileStart = lineStarts[start] ?? 0
+                const fileEnd = (lineStarts[end] ?? 0) + (linesArray[end]?.length ?? 0)
+
+                const entitiesArr: any[] = []
+                // If this container carries explicit fields, make a single entity for them
+                const fs = (ce as any).fields ?? []
+                if (fs.length > 0) {
+                  const ent: any = { startLine: start, endLine: end, fileStart, fileEnd, entityType: (ce as any).entityType ?? 'Unknown', fields: [] }
+                  for (const f of fs) {
+                    const li = f.lineIndex ?? start
+                    const fieldFileStart = (lineStarts[li] ?? 0) + (f.start ?? 0)
+                    const fieldFileEnd = (lineStarts[li] ?? 0) + (f.end ?? 0)
+                    ent.fields.push({ ...f, fileStart: fieldFileStart, fileEnd: fieldFileEnd, text: linesArray[li]?.slice(f.start ?? 0, f.end ?? 0) })
+                  }
+                  entitiesArr.push(ent)
+                }
+
+                // Also include any explicit entity entries that lie inside this record
+                for (const inner of normalizedFb.combinedEntities) {
+                  if ((inner as any).entityType && (inner as any).startLine !== undefined) {
+                    const is = (inner as any).startLine
+                    const ie = (inner as any).endLine ?? is
+                    if (is >= start && ie <= end) {
+                      const ifileStart = lineStarts[is] ?? 0
+                      const ifileEnd = (lineStarts[ie] ?? 0) + (linesArray[ie]?.length ?? 0)
+                      const ent: any = { startLine: is, endLine: ie, fileStart: ifileStart, fileEnd: ifileEnd, entityType: (inner as any).entityType ?? 'Unknown', fields: [] }
+                      for (const f of (inner as any).fields ?? []) {
+                        const li = f.lineIndex ?? is
+                        const fieldFileStart = (lineStarts[li] ?? 0) + (f.start ?? 0)
+                        const fieldFileEnd = (lineStarts[li] ?? 0) + (f.end ?? 0)
+                        ent.fields.push({ ...f, fileStart: fieldFileStart, fileEnd: fieldFileEnd, text: linesArray[li]?.slice(f.start ?? 0, f.end ?? 0) })
+                      }
+                      entitiesArr.push(ent)
+                    }
+                  }
+                }
+
+                // If we found any entity-like content, add the synthesized record
+                if (entitiesArr.length > 0) recs.push({ startLine: start, endLine: end, fileStart, fileEnd, entities: entitiesArr })
+              }
+            }
+
+            if (recs.length > 0) extractedRecords = recs
+          }
 
           console.log('Extracted records:', JSON.stringify(extractedRecords, null, 2))
           setRecords(extractedRecords)
@@ -303,15 +369,71 @@ function App() {
             setRecords(newPred as unknown as RecordSpan[])
           } else {
             const normalizedFb = normalizeFeedback({ entries: newEntries }, lines)
-            const extractedRecords = entitiesFromJointSequence(
+            let extractedRecords = entitiesFromJointSequence(
               lines,
               newSpans ?? spansPerLine,
               newPred as any,
               newWeights,
               segmentFeatures,
               householdInfoSchema,
-              normalizedFb.entities
+              normalizedFb.combinedEntities
             )
+
+            if ((!extractedRecords || extractedRecords.length === 0) && (normalizedFb.combinedEntities && normalizedFb.combinedEntities.length > 0)) {
+              const lineStarts: number[] = []
+              let off = 0
+              for (let i = 0; i < lines.length; i++) {
+                lineStarts.push(off)
+                off += (lines[i]?.length ?? 0) + 1
+              }
+
+              const recs: RecordSpan[] = []
+              for (const ce of normalizedFb.combinedEntities) {
+                if ((ce as any).startLine !== undefined) {
+                  const start = (ce as any).startLine
+                  const end = (ce as any).endLine ?? start
+                  const fileStart = lineStarts[start] ?? 0
+                  const fileEnd = (lineStarts[end] ?? 0) + (lines[end]?.length ?? 0)
+
+                  const entitiesArr: any[] = []
+                  const fs = (ce as any).fields ?? []
+                  if (fs.length > 0) {
+                    const ent: any = { startLine: start, endLine: end, fileStart, fileEnd, entityType: (ce as any).entityType ?? 'Unknown', fields: [] }
+                    for (const f of fs) {
+                      const li = f.lineIndex ?? start
+                      const fieldFileStart = (lineStarts[li] ?? 0) + (f.start ?? 0)
+                      const fieldFileEnd = (lineStarts[li] ?? 0) + (f.end ?? 0)
+                      ent.fields.push({ ...f, fileStart: fieldFileStart, fileEnd: fieldFileEnd, text: lines[li]?.slice(f.start ?? 0, f.end ?? 0) })
+                    }
+                    entitiesArr.push(ent)
+                  }
+
+                  for (const inner of normalizedFb.combinedEntities) {
+                    if ((inner as any).entityType && (inner as any).startLine !== undefined) {
+                      const is = (inner as any).startLine
+                      const ie = (inner as any).endLine ?? is
+                      if (is >= start && ie <= end) {
+                        const ifileStart = lineStarts[is] ?? 0
+                        const ifileEnd = (lineStarts[ie] ?? 0) + (lines[ie]?.length ?? 0)
+                        const ent: any = { startLine: is, endLine: ie, fileStart: ifileStart, fileEnd: ifileEnd, entityType: (inner as any).entityType ?? 'Unknown', fields: [] }
+                        for (const f of (inner as any).fields ?? []) {
+                          const li = f.lineIndex ?? is
+                          const fieldFileStart = (lineStarts[li] ?? 0) + (f.start ?? 0)
+                          const fieldFileEnd = (lineStarts[li] ?? 0) + (f.end ?? 0)
+                          ent.fields.push({ ...f, fileStart: fieldFileStart, fileEnd: fieldFileEnd, text: lines[li]?.slice(f.start ?? 0, f.end ?? 0) })
+                        }
+                        entitiesArr.push(ent)
+                      }
+                    }
+                  }
+
+                  if (entitiesArr.length > 0) recs.push({ startLine: start, endLine: end, fileStart, fileEnd, entities: entitiesArr })
+                }
+              }
+
+              if (recs.length > 0) extractedRecords = recs
+            }
+
             setRecords(extractedRecords)
           }
         }
@@ -498,7 +620,7 @@ function App() {
                   </div>
 
                   <div className="field-buttons">
-                    {householdInfoSchema.fields.map((field) => (
+                    {householdInfoSchema.fields.map((field: any) => (
                       <button
                         key={field.name}
                         className={`legend-button field-button field-${field.name.toLowerCase()}`}

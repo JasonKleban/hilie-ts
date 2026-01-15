@@ -149,10 +149,10 @@ function testFeedbackTwoEntities() {
   assert(records[0]!.entities[0]!.entityType === 'Primary', 'first entity should be Primary')
   assert(records[1]!.entities[0]!.entityType === 'Guardian', 'second entity should be Guardian')
   // New assertion: when file-offset entity feedback is provided, the rendered entity should preserve asserted file offsets (no whole-line snap)
-  const fbPrimary = normalizedFb.entities.find(s => s.entityType === 'Primary')!
-  const fbGuardian = normalizedFb.entities.find(s => s.entityType === 'Guardian')!
-  assert(Boolean(fbPrimary && records[0]!.entities[0]!.fileStart === fbPrimary.fileStart && records[0]!.entities[0]!.fileEnd === fbPrimary.fileEnd), 'primary entity should preserve fileStart/fileEnd')
-  assert(Boolean(fbGuardian && records[1]!.entities[0]!.fileStart === fbGuardian.fileStart && records[1]!.entities[0]!.fileEnd === fbGuardian.fileEnd), 'guardian entity should preserve fileStart/fileEnd')
+  const fbPrimary = normalizedFb.entities.find((s:any) => s.entityType === 'Primary')!
+  const fbGuardian = normalizedFb.entities.find((s:any) => s.entityType === 'Guardian')!
+  assert(Boolean(fbPrimary && records[0]!.entities[0]!.fileStart === (fbPrimary as any).fileStart && records[0]!.entities[0]!.fileEnd === (fbPrimary as any).fileEnd), 'primary entity should preserve fileStart/fileEnd')
+  assert(Boolean(fbGuardian && records[1]!.entities[0]!.fileStart === (fbGuardian as any).fileStart && records[1]!.entities[0]!.fileEnd === (fbGuardian as any).fileEnd), 'guardian entity should preserve fileStart/fileEnd')
 
 
 }

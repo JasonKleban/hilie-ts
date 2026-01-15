@@ -142,11 +142,11 @@ export function buildFeedbackContext(
   }
 
   for (const ent of feedbackEntitiesExplicit ?? []) {
-    if (ent.entityType === undefined) continue;
+    if ((ent as any).entityType === undefined) continue;
 
-    if (ent.fileStart !== undefined && ent.fileEnd !== undefined) {
-      const fs = ent.fileStart
-      const fe = ent.fileEnd
+    if ((ent as any).fileStart !== undefined && (ent as any).fileEnd !== undefined) {
+      const fs = (ent as any).fileStart
+      const fe = (ent as any).fileEnd
       const startLine = offsetToLine(fs)
       const endLine = offsetToLine(Math.max(0, fe - 1))
       const boundedEnd = Math.min(endLine, spansCopy.length - 1)
@@ -185,7 +185,7 @@ export function buildFeedbackContext(
       }
       
       for (let li = startLine; li <= boundedEnd; li++) {
-        entityTypeMap[li] = ent.entityType as EntityType
+        entityTypeMap[li] = (ent as any).entityType as EntityType
       }
 
       // If this sub-entity is not inside an explicit record assertion, create
@@ -198,12 +198,12 @@ export function buildFeedbackContext(
         forcedBoundariesByLine[startLine] = 'B'
         for (let li = startLine + 1; li <= boundedEnd; li++) forcedBoundariesByLine[li] = 'C'
       }
-    } else if (ent.startLine !== undefined) {
-      const startLine = ent.startLine
-      const endLine = (ent.endLine !== undefined && ent.endLine >= startLine) ? ent.endLine : startLine;
+    } else if ((ent as any).startLine !== undefined) {
+      const startLine = (ent as any).startLine
+      const endLine = ((ent as any).endLine !== undefined && (ent as any).endLine >= startLine) ? (ent as any).endLine : startLine;
       const boundedEnd = Math.min(endLine, spansCopy.length - 1);
       for (let li = startLine; li <= boundedEnd; li++) {
-        entityTypeMap[li] = ent.entityType as EntityType;
+        entityTypeMap[li] = (ent as any).entityType as EntityType;
       }
 
       const containedInRecord = recordAssertions && recordAssertions.some(r => r.startLine !== undefined && r.startLine <= startLine && r.endLine !== undefined && r.endLine >= endLine)
@@ -222,9 +222,9 @@ export function buildFeedbackContext(
 
   // Entity assertions first
   for (const fb of feedbackEntitiesExplicit ?? []) {
-    if (fb.fileStart === undefined || fb.fileEnd === undefined) continue;
-    const fs = fb.fileStart;
-    const fe = fb.fileEnd;
+    if ((fb as any).fileStart === undefined || (fb as any).fileEnd === undefined) continue;
+    const fs = (fb as any).fileStart;
+    const fe = (fb as any).fileEnd;
     const startLine = offsetToLine(fs);
     const endLine = offsetToLine(Math.max(0, fe - 1));
 

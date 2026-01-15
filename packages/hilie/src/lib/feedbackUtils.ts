@@ -219,7 +219,7 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
   // assertion).
   const explicitRecordsWithFields: RecordAssertion[] = keptRecords.map(r => ({ ...r, fields: [] }))
   const explicitEntitiesWithFields: SubEntityAssertion[] = keptEntities.map(se => ({ ...se, fields: [] }))
-  const implicitRecordContainers: RecordAssertion[] = []
+  const implicitRecordContainers: SubEntityAssertion[] = []
 
   function findOrCreateRecordContainerForLine(lineIndex: number) {
     const existingExplicit = explicitRecordsWithFields.find(r => lineIndex >= r.startLine && lineIndex <= r.endLine)
@@ -228,7 +228,11 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
     const existingImplicit = implicitRecordContainers.find(r => r.startLine === lineIndex && r.endLine === lineIndex)
     if (existingImplicit) return existingImplicit
 
-    const implicit: RecordAssertion = { startLine: lineIndex, endLine: lineIndex, fields: [] }
+    const implicit: SubEntityAssertion = { startLine: lineIndex, endLine: lineIndex, fields: [] }
+    if (lineStarts && lineIndex >= 0 && lineIndex < lineStarts.length && lines) {
+      implicit.fileStart = lineStarts[lineIndex]!
+      implicit.fileEnd = (lineStarts[lineIndex] ?? 0) + (lines[lineIndex]?.length ?? 0)
+    }
     implicitRecordContainers.push(implicit)
     return implicit
   }
@@ -273,10 +277,14 @@ export function normalizeFeedbackEntries(entries: FeedbackEntry[] = [], lines?: 
   // Stable ordering
   explicitRecordsWithFields.sort((a, b) => a.startLine - b.startLine)
   explicitEntitiesWithFields.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
-  implicitRecordContainers.sort((a, b) => a.startLine - b.startLine)
+  implicitRecordContainers.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0))
 
   const entities: EntityAssertion[] = [...explicitRecordsWithFields, ...implicitRecordContainers, ...explicitEntitiesWithFields]
-  return { records: explicitRecordsWithFields, entities: explicitEntitiesWithFields, combinedEntities: entities }
+  // `entities` contains explicit sub-entity containers *and* any implicit
+  // per-line containers synthesized for field-only feedback, for callers that
+  // expect to iterate entity containers directly (demo uses this).
+  const entitiesForOutput: EntityAssertion[] = [...implicitRecordContainers, ...explicitEntitiesWithFields]
+  return { records: explicitRecordsWithFields, entities: entitiesForOutput, combinedEntities: entities }
 }
 
 export function normalizeFeedback(feedback: Feedback, lines?: string[]) {

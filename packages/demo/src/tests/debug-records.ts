@@ -27,7 +27,7 @@ const weights = {
 }
 
 const pred = decodeJointSequence(lines, spans, weights, householdInfoSchema, boundaryFeatures, segmentFeatures, { maxStates: 512, safePrefix: 6 })
-const records = entitiesFromJointSequence(lines, spans, pred, weights, segmentFeatures, householdInfoSchema)
+const records = entitiesFromJointSequence(lines, spans, pred as any, weights, segmentFeatures, householdInfoSchema)
 
 for (const r of records) {
   if (r.fileStart === 84 && r.fileEnd === 97) {

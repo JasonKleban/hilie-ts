@@ -7,7 +7,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p . && node scripts/copy-test-data.cjs",
     "test": "npm run build && vitest run",
     "unit-test": "vitest run",
     "generate": "npm run build && node dist/scripts/convert.js",
